@@ -24,6 +24,14 @@ O mouse fica preso na arena durante o treino. `Esc` pausa e `R` reinicia.
 | Reflexo | Bolinhas que somem em 1,2 s |
 | Alvo Móvel | Bolinhas atravessando a arena; é preciso antecipar o movimento |
 | Rastreio | Segure o clique e mantenha a mira na bolinha enquanto ela muda de direção |
+| Bonecos 3D | Arena 3D com bonecos amarelos atrás de uma mureta, pistola e mão na tela; derrube um e outro aparece |
+
+## Bonecos 3D
+
+Modo em primeira pessoa feito com [Three.js](https://threejs.org) (carregado do CDN só quando o modo é escolhido,
+então precisa de internet). A câmera usa o campo de visão do jogo escolhido (CS2 ou Valorant) e gira com a mesma
+conta de sensibilidade, então o movimento da mão é igual ao do jogo. Três bonecos ficam na plataforma, alguns andando
+para os lados; cada abate faz outro surgir. Tiro na cabeça aparece com marcador vermelho e conta em "Na cabeça".
 
 ## Resultados
 

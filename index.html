@@ -78,7 +78,9 @@ button,input,select{font:inherit;color:inherit}
 .hud-stats{display:flex;justify-content:flex-end;gap:18px;font:500 14px var(--mono);font-variant-numeric:tabular-nums}
 .hud-stats span small{display:block;font:600 10px var(--body);letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
 .field{position:relative;flex:1;min-height:0;background:var(--arena)}
-#cv{position:absolute;inset:0;width:100%;height:100%;display:block;touch-action:none}
+#cv,#cv3{position:absolute;inset:0;width:100%;height:100%;display:block;touch-action:none}
+#cv3{pointer-events:none}
+.mode-tag{display:inline-block;margin-left:6px;padding:0 6px;border-radius:4px;background:var(--accent);color:var(--accent-ink);font:600 10px/16px var(--body);letter-spacing:.06em;vertical-align:2px}
 #cv.hide-cursor{cursor:none}
 
 .overlay{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:24px;text-align:center;background:rgba(10,18,22,.82)}
@@ -214,6 +216,7 @@ kbd{font:500 11px var(--mono);border:1px solid var(--line);border-bottom-width:2
       </div>
     </div>
     <div class="field" id="field">
+      <canvas id="cv3" hidden></canvas>
       <canvas id="cv"></canvas>
       <div class="overlay" id="overlay"></div>
     </div>
@@ -315,7 +318,8 @@ const MODES = [
   { id:'flick',  name:'Flick Longo',   desc:'A bolinha alterna entre as bordas esquerda e direita da arena.',       count:1, r:30, spawn:'sides' },
   { id:'reflex', name:'Reflexo',       desc:'Duas bolinhas somem em 1,2 s. Acerte antes que elas escapem.',        count:2, r:28, spawn:'any', life:1200 },
   { id:'moving', name:'Alvo Móvel',    desc:'Duas bolinhas atravessam a arena. Antecipe o movimento e clique.',     count:2, r:28, spawn:'any', speed:170 },
-  { id:'track',  name:'Rastreio',      desc:'Segure o clique e mantenha a mira na bolinha enquanto ela muda de direção.', count:1, r:30, spawn:'center', speed:230, track:true }
+  { id:'track',  name:'Rastreio',      desc:'Segure o clique e mantenha a mira na bolinha enquanto ela muda de direção.', count:1, r:30, spawn:'center', speed:230, track:true },
+  { id:'bots3d', name:'Bonecos 3D',    desc:'Arena 3D com bonecos amarelos atrás da mureta. Derrube um e outro aparece. Tiro na cabeça conta à parte.', count:3, three:true }
 ];
 let mode = MODES[0];
 
@@ -362,6 +366,7 @@ function posToAng(){
 let remaining = 0, cdLeft = 0;
 let hits = 0, misses = 0, escaped = 0, sumRt = 0, streak = 0, bestStreak = 0, sumOff = 0;
 /* Rastreio: tempo total, tempo com a mira na bolinha e maior trecho contínuo. */
+let heads = 0, hitMark = { life:0, head:false };
 let held = false, trackT = 0, onT = 0, onRun = 0, bestOnRun = 0, onTarget = false;
 let flickSide = 0, lastHit = null;
 let lastFrame = 0;
@@ -396,6 +401,7 @@ function resize(){
   W = nw; H = nh;
   scale = clamp(Math.min(W,H)/600, 0.6, 1.3);
   posToAng();
+  w3Resize();
 }
 if('ResizeObserver' in window) new ResizeObserver(resize).observe(field);
 window.addEventListener('resize', resize);
@@ -461,7 +467,9 @@ function resetRun(){
   balls = []; particles = []; ripples = [];
   hits = misses = escaped = sumRt = streak = bestStreak = sumOff = 0;
   trackT = onT = onRun = bestOnRun = 0; onTarget = false;
+  heads = 0; hitMark.life = 0;
   lastHit = null; flickSide = 0;
+  w3Clear();
   remaining = cfg.dur * 1000;
   pos.x = W/2; pos.y = H/2; ang.x = 0; ang.y = 0;
 }
@@ -477,6 +485,11 @@ function lockPointer(){
 function unlockPointer(){ try{ if(document.pointerLockElement) document.exitPointerLock(); }catch(e){} }
 
 function startRun(){
+  if(mode.three && !w3.ready){
+    showOverlay('<p class="ov-kicker">Bonecos 3D</p><h2>Carregando…</h2><p class="ov-meta">Preparando a arena 3D</p>');
+    ensureThree().then(() => { w3Init(); if(mode.three) startRun(); }).catch(show3dError);
+    return;
+  }
   resetRun();
   cdLeft = 3000;
   if(cfg.full && !document.fullscreenElement){
@@ -492,7 +505,7 @@ function startRun(){
 
 function beginPlay(){
   setPhase('running');
-  fillBalls();
+  if(mode.three) w3Fill(); else fillBalls();
 }
 
 function pauseRun(){
@@ -518,6 +531,7 @@ function quitRun(){
   unlockPointer();
   setPhase('idle');
   balls = []; particles = []; ripples = [];
+  w3Clear();
   remaining = cfg.dur * 1000;
   showIdle();
 }
@@ -539,6 +553,7 @@ function finishRun(){
   setPhase('done');
   unlockPointer();
   balls = []; held = false;
+  w3Clear();
   const score = runScore();
   const prev = getBest(mode, cfg.dur);
   const record = score > prev && score > 0;
@@ -556,6 +571,14 @@ function finishRun(){
       '<div><b>' + accPct + '%</b><small>Tempo na mira</small></div>' +
       '<div><b>' + fmt(onT/1000, 1) + ' s</b><small>Total na mira</small></div>' +
       '<div><b>' + fmt(bestOnRun/1000, 1) + ' s</b><small>Maior trecho</small></div>';
+  }else if(mode.three){
+    cells =
+      '<div class="main"><b>' + hits + '</b><small>Abates</small></div>' +
+      '<div><b>' + (shots ? accPct + '%' : '—') + '</b><small>Precisão</small></div>' +
+      '<div><b>' + (hits ? Math.round(sumRt/hits) + ' ms' : '—') + '</b><small>Tempo por alvo</small></div>' +
+      '<div><b>' + (hits ? Math.round(heads/hits*100) + '%' : '—') + '</b><small>Na cabeça</small></div>' +
+      '<div><b>' + bestStreak + '</b><small>Melhor sequência</small></div>' +
+      '<div><b>' + misses + '</b><small>Erros</small></div>';
   }else{
     const acc = shots ? accPct + '%' : '—';
     const avg = hits ? Math.round(sumRt/hits) + ' ms' : '—';
@@ -619,6 +642,13 @@ overlay.addEventListener('click', e => {
 document.addEventListener('mousemove', e => {
   if(!locked) return;
   const k = cfg.sens * YAW[cfg.game] * cfg.fine * (cfg.dprFix ? (window.devicePixelRatio || 1) : 1);   // graus por unidade do mouse
+  if(mode.three){
+    /* No 3D a câmera gira de verdade e a mira fica no centro, como no jogo. */
+    w3.yaw = (w3.yaw + e.movementX*k) % 360;
+    w3.pitch = clamp(w3.pitch + e.movementY*k, -89, 89);
+    pos.x = W/2; pos.y = H/2;
+    return;
+  }
   ang.x += e.movementX*k;
   ang.y += e.movementY*k;
   angToPos();
@@ -643,7 +673,7 @@ document.addEventListener('pointerup', e => { if(e.button === 0) held = false; }
 document.addEventListener('pointercancel', () => { held = false; });
 document.addEventListener('pointerlockchange', () => {
   locked = document.pointerLockElement === cv;
-  if(locked) posToAng();
+  if(locked){ if(mode.three){ pos.x = W/2; pos.y = H/2; } else posToAng(); }
   cv.classList.toggle('hide-cursor', (phase==='running' || phase==='count') && !locked);
   if(!locked && (phase === 'running' || phase === 'count')) pauseRun();
 });
@@ -669,6 +699,19 @@ function popScale(b){
 
 function shoot(){
   if(phase !== 'running' || mode.track) return;
+  if(mode.three){
+    const r = w3Shoot();
+    shotSound();
+    if(r){
+      hits++; streak++; bestStreak = Math.max(bestStreak, streak); sumRt += r.rt;
+      if(r.head) heads++;
+      hitMark.life = 1; hitMark.head = r.head;
+      tone(r.head ? 1250 : 900, .08, 'sine', .08);
+    }else{
+      misses++; streak = 0;
+    }
+    return;
+  }
   let idx = -1;
   for(let i = balls.length-1; i >= 0; i--){
     const b = balls[i];
@@ -696,6 +739,339 @@ function shoot(){
   }
 }
 
+/* ---------- Modo 3D (Bonecos 3D) ----------
+   Three.js é carregado só quando o modo é escolhido. 1 unidade = 1 metro.
+   A câmera usa o mesmo campo de visão do jogo escolhido, então a sensibilidade bate com a do jogo. */
+const THREE_URLS = [
+  'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js',
+  'https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js'
+];
+const cv3 = $('#cv3');
+const w3 = {
+  ready:false, renderer:null, scene:null, camera:null, gun:null, flash:null, flashLight:null, ray:null,
+  solids:[], bots:[], dying:[], decals:[], geo:null,
+  yaw:0, pitch:0, kick:0, flashT:0, lastX:null
+};
+const BOT_COLOR = 0xffc928;
+const PLAT_Y = 0.95;
+const ARENA3 = { minX:-7.5, maxX:7.5, minZ:-12.5, maxZ:-7.2 };
+const CAM_POS = [0, 1.7, 2];
+const rnd = (a,b) => a + Math.random()*(b-a);
+
+let threeLoad = null;
+function ensureThree(){
+  if(window.THREE) return Promise.resolve();
+  if(!threeLoad){
+    threeLoad = THREE_URLS.reduce((prev, url) => prev.catch(() => new Promise((res, rej) => {
+      const sc = document.createElement('script');
+      sc.src = url; sc.async = true; sc.crossOrigin = 'anonymous';
+      sc.onload = () => window.THREE ? res() : rej(new Error('three'));
+      sc.onerror = () => { sc.remove(); rej(new Error('three')); };
+      document.head.appendChild(sc);
+    })), Promise.reject(new Error('start')));
+    threeLoad.catch(() => { threeLoad = null; });
+  }
+  return threeLoad;
+}
+
+function show3dError(){
+  setPhase('idle');
+  showOverlay(
+    '<p class="ov-kicker">Bonecos 3D</p><h2>Sem 3D por agora</h2>' +
+    '<p class="ov-desc">Não deu para carregar a biblioteca 3D. Confira a conexão com a internet e tente de novo.</p>' +
+    '<button class="btn primary" data-act="start" type="button">Tentar de novo</button>'
+  );
+}
+
+function show3d(on){
+  cv3.hidden = !on;
+  if(on && !w3.ready) ensureThree().then(() => { w3Init(); }).catch(() => {});
+}
+
+/* Textura de grade, desenhada num canvas para não depender de imagens. */
+function gridTex(base, line, repX, repY){
+  const c = document.createElement('canvas'); c.width = c.height = 256;
+  const g = c.getContext('2d');
+  g.fillStyle = base; g.fillRect(0,0,256,256);
+  g.strokeStyle = line;
+  g.globalAlpha = .45; g.lineWidth = 1;
+  g.beginPath();
+  for(let i = 1; i < 4; i++){ g.moveTo(i*64+.5, 0); g.lineTo(i*64+.5, 256); g.moveTo(0, i*64+.5); g.lineTo(256, i*64+.5); }
+  g.stroke();
+  g.globalAlpha = 1; g.lineWidth = 3; g.strokeRect(1.5,1.5,253,253);
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.repeat.set(repX, repY);
+  t.anisotropy = 8;
+  return t;
+}
+
+function w3Init(){
+  if(w3.ready || !window.THREE) return;
+  const T = THREE;
+  let renderer;
+  try{
+    renderer = new T.WebGLRenderer({ canvas:cv3, antialias:true, powerPreference:'high-performance' });
+  }catch(e){ show3dError(); return; }
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  const scene = new T.Scene();
+  scene.background = new T.Color(0x1b2329);
+  scene.fog = new T.Fog(0x1b2329, 18, 40);
+
+  const camera = new T.PerspectiveCamera(70, W/H, 0.02, 100);
+  camera.rotation.order = 'YXZ';
+  camera.position.set(CAM_POS[0], CAM_POS[1], CAM_POS[2]);
+  scene.add(camera);
+
+  scene.add(new T.HemisphereLight(0xe6eef3, 0x20292f, 0.85));
+  const sun = new T.DirectionalLight(0xffffff, 0.55);
+  sun.position.set(6, 12, 8);
+  scene.add(sun);
+
+  /* Sala: chão, paredes e teto com grade de 2 m. */
+  const wallMat = (rx, ry) => new T.MeshLambertMaterial({ map:gridTex('#36424c', '#5b6b77', rx, ry) });
+  const plane = (w, h, mat, x, y, z, rx, ry) => {
+    const m = new T.Mesh(new T.PlaneGeometry(w, h), mat);
+    m.position.set(x, y, z); m.rotation.set(rx || 0, ry || 0, 0);
+    scene.add(m); w3.solids.push(m); return m;
+  };
+  plane(28, 32, new T.MeshLambertMaterial({ map:gridTex('#2b343b', '#4e5d68', 14, 16) }), 0, 0, -6, -Math.PI/2);
+  plane(28, 9, wallMat(14, 4.5), 0, 4.5, -22);
+  plane(32, 9, wallMat(16, 4.5), -14, 4.5, -6, 0, Math.PI/2);
+  plane(32, 9, wallMat(16, 4.5), 14, 4.5, -6, 0, -Math.PI/2);
+  plane(28, 9, wallMat(14, 4.5), 0, 4.5, 10, 0, Math.PI);
+  plane(28, 32, new T.MeshBasicMaterial({ color:0x2a343b }), 0, 9, -6, Math.PI/2);
+
+  /* Plataforma onde os bonecos ficam e a mureta da frente. */
+  const box = (w, h, d, color, x, y, z) => {
+    const m = new T.Mesh(new T.BoxGeometry(w, h, d), new T.MeshLambertMaterial({ color }));
+    m.position.set(x, y, z); scene.add(m); w3.solids.push(m); return m;
+  };
+  box(18, PLAT_Y, 8, 0x3d4a54, 0, PLAT_Y/2, -10);
+  box(18, 1.3, 0.3, 0x4b5a66, 0, 1.3/2, -5.85);
+  box(18, 0.06, 0.34, 0x5fd4e8, 0, 1.33, -5.85);
+
+  /* Geometrias dos bonecos, compartilhadas. */
+  w3.geo = {
+    body: new T.CylinderGeometry(0.34, 0.34, 1.05, 20),
+    cap:  new T.SphereGeometry(0.34, 20, 12),
+    head: new T.SphereGeometry(0.21, 20, 14),
+    neck: new T.CylinderGeometry(0.1, 0.12, 0.12, 12),
+    decal:new T.CircleGeometry(0.045, 10)
+  };
+  w3.decalMat = new T.MeshBasicMaterial({ color:0x0b0f12, transparent:true, opacity:.75, depthWrite:false, polygonOffset:true, polygonOffsetFactor:-2 });
+
+  w3.gun = buildGun(T);
+  camera.add(w3.gun);
+
+  w3.renderer = renderer; w3.scene = scene; w3.camera = camera;
+  w3.ray = new T.Raycaster();
+  w3.ready = true;
+  w3Resize();
+}
+
+/* Pistola simples e a mão direita segurando, presas à câmera. */
+function buildGun(T){
+  const g = new T.Group();
+  const mat = c => new T.MeshLambertMaterial({ color:c });
+  const slideM = mat(0x3a4148), frameM = mat(0x23282d), metalM = mat(0x121518), accentM = mat(0xffb020);
+  const skinM = mat(0xd99b74), sleeveM = mat(0x24343f);
+  const box = (w,h,d,m,x,y,z,rx,parent) => {
+    const o = new T.Mesh(new T.BoxGeometry(w,h,d), m);
+    o.position.set(x,y,z); o.rotation.x = rx || 0; (parent || g).add(o); return o;
+  };
+
+  // Ferrolho, com faixa amarela e ranhuras atrás.
+  box(.068, .072, .36, slideM, 0, .052, -.04);
+  box(.07, .018, .22, accentM, 0, .07, -.06);
+  for(let i = 0; i < 4; i++) box(.071, .05, .007, metalM, 0, .05, .085 + i*.02);
+  // Cano, miras.
+  const barrel = new T.Mesh(new T.CylinderGeometry(.016, .016, .03, 12), metalM);
+  barrel.rotation.x = Math.PI/2; barrel.position.set(0, .047, -.232); g.add(barrel);
+  box(.012, .016, .012, metalM, 0, .096, -.205);
+  box(.034, .016, .014, metalM, 0, .096, .125);
+  // Armação, guarda-mato, gatilho.
+  box(.062, .04, .30, frameM, 0, -.002, -.03);
+  box(.022, .012, .085, frameM, 0, -.07, -.055);
+  box(.022, .055, .012, frameM, 0, -.045, -.098);
+  box(.012, .035, .01, metalM, 0, -.04, -.045);
+  // Cabo inclinado com detalhe amarelo.
+  box(.058, .2, .082, frameM, 0, -.115, .075, -.28);
+  box(.06, .05, .05, accentM, 0, -.2, .1, -.28);
+
+  // Mão: palma em volta do cabo, dedos na frente, polegar ao lado e antebraço.
+  const hand = new T.Group(); g.add(hand);
+  box(.074, .13, .1, skinM, .018, -.12, .09, -.28, hand);
+  for(let i = 0; i < 3; i++) box(.078, .026, .034, skinM, .002, -.085 - i*.034, .028 + i*.01, -.28, hand);
+  box(.026, .022, .05, skinM, .012, -.04, -.04, 0, hand);           // indicador no gatilho
+  box(.024, .024, .09, skinM, -.038, -.01, .03, .1, hand);          // polegar
+  const dir = new T.Vector3(.32, -.5, .8).normalize();
+  const wrist = new T.Vector3(.02, -.19, .15);
+  const limb = (r1, r2, len, m, start) => {
+    const o = new T.Mesh(new T.CylinderGeometry(r1, r2, len, 16), m);
+    o.quaternion.setFromUnitVectors(new T.Vector3(0,1,0), dir.clone().negate());
+    o.position.copy(wrist).addScaledVector(dir, start + len/2);
+    hand.add(o); return o;
+  };
+  limb(.045, .055, .3, skinM, 0);
+  limb(.07, .075, .45, sleeveM, .26);
+
+  // Clarão do disparo.
+  const flash = new T.Mesh(new T.SphereGeometry(.035, 10, 8), new T.MeshBasicMaterial({ color:0xffe7a3, transparent:true, opacity:.95 }));
+  flash.position.set(0, .047, -.27); flash.visible = false; g.add(flash);
+  const light = new T.PointLight(0xffc560, 0, 5); light.position.copy(flash.position); g.add(light);
+  w3.flash = flash; w3.flashLight = light;
+
+  g.position.set(.19, -.145, -.44);
+  g.rotation.y = .1;
+  g.scale.setScalar(.82);
+  g.userData.base = g.position.clone();
+  return g;
+}
+
+function vFov(){ return 2*Math.atan(Math.tan(FOV[cfg.game]*RAD/2) * 9/16) / RAD; }
+
+function w3Resize(){
+  if(!w3.ready) return;
+  w3.renderer.setSize(W, H, false);
+  w3.camera.aspect = W/H;
+  w3.camera.fov = vFov();
+  w3.camera.updateProjectionMatrix();
+}
+
+function makeBot(){
+  const T = THREE, g = new T.Group();
+  const m = new T.MeshLambertMaterial({ color:BOT_COLOR, emissive:0x000000 });
+  const part = (geo, y, head) => { const o = new T.Mesh(geo, m); o.position.y = y; o.userData.head = !!head; g.add(o); return o; };
+  part(w3.geo.cap, .34);
+  part(w3.geo.body, .34 + 1.05/2);
+  part(w3.geo.cap, .34 + 1.05);
+  part(w3.geo.neck, 1.78);
+  part(w3.geo.head, 2.0, true);
+  g.userData = { mat:m, age:0, vx:0, turn:0, t:0 };
+  return g;
+}
+
+function w3Spawn(){
+  let x, z, tries = 0, ok;
+  do{
+    x = rnd(ARENA3.minX, ARENA3.maxX); z = rnd(ARENA3.minZ, ARENA3.maxZ); tries++;
+    ok = !w3.bots.some(b => Math.abs(b.position.x - x) < 1.6);   // lado a lado, sem um esconder o outro
+    if(ok && w3.lastX !== null) ok = Math.abs(w3.lastX - x) > 1.5;
+  }while(!ok && tries < 40);
+  const b = makeBot();
+  b.position.set(x, PLAT_Y, z);
+  b.userData.vx = Math.random() < .6 ? (Math.random() < .5 ? -1 : 1) * rnd(.7, 1.8) : 0;
+  b.userData.turn = rnd(500, 1600);
+  if(!reduceMotion) b.scale.set(1, .01, 1);
+  w3.scene.add(b); w3.bots.push(b);
+}
+
+function w3Fill(){ if(w3.ready) while(w3.bots.length < mode.count) w3Spawn(); }
+
+function disposeBot(b){ w3.scene.remove(b); b.userData.mat.dispose(); }
+
+function w3Clear(){
+  if(!w3.ready) return;
+  w3.bots.forEach(disposeBot); w3.dying.forEach(disposeBot);
+  w3.decals.forEach(d => w3.scene.remove(d));
+  w3.bots = []; w3.dying = []; w3.decals = [];
+  w3.yaw = 0; w3.pitch = 0; w3.lastX = null; w3.kick = 0; w3.flashT = 0;
+}
+
+function botOf(obj){
+  while(obj && !w3.bots.includes(obj)) obj = obj.parent;
+  return obj;
+}
+
+/* Dispara um raio do centro da tela (ou do cursor, sem o mouse preso). Retorna {rt, head} no acerto. */
+function w3Shoot(){
+  if(!w3.ready) return null;
+  w3.kick = 1; w3.flashT = 55;
+  const ndc = locked ? new THREE.Vector2(0, 0) : new THREE.Vector2(pos.x/W*2 - 1, -(pos.y/H*2 - 1));
+  w3.camera.updateMatrixWorld();
+  w3.ray.setFromCamera(ndc, w3.camera);
+  const hit = w3.ray.intersectObjects(w3.bots.concat(w3.solids), true)[0];
+  if(!hit) return null;
+  const bot = botOf(hit.object);
+  if(bot){
+    w3.bots.splice(w3.bots.indexOf(bot), 1);
+    bot.userData.t = 0;
+    bot.userData.mat.emissive.setHex(0xffffff);
+    w3.dying.push(bot);
+    w3.lastX = bot.position.x;
+    w3Fill();
+    return { rt:bot.userData.age, head:!!hit.object.userData.head };
+  }
+  if(hit.face){
+    const n = hit.face.normal.clone().transformDirection(hit.object.matrixWorld);
+    const d = new THREE.Mesh(w3.geo.decal, w3.decalMat);
+    d.position.copy(hit.point).addScaledVector(n, .005);
+    d.lookAt(hit.point.clone().add(n));
+    w3.scene.add(d); w3.decals.push(d);
+    if(w3.decals.length > 40) w3.scene.remove(w3.decals.shift());
+  }
+  return null;
+}
+
+function w3Update(dt){
+  const s = dt/1000;
+  for(const b of w3.bots){
+    const u = b.userData;
+    u.age += dt;
+    if(b.scale.y < 1) b.scale.y = Math.min(1, b.scale.y + dt/160);
+    if(u.vx){
+      b.position.x += u.vx*s;
+      if(b.position.x < ARENA3.minX){ b.position.x = ARENA3.minX; u.vx = Math.abs(u.vx); }
+      if(b.position.x > ARENA3.maxX){ b.position.x = ARENA3.maxX; u.vx = -Math.abs(u.vx); }
+      u.turn -= dt;
+      if(u.turn <= 0){ u.vx = (Math.random() < .5 ? -1 : 1) * rnd(.7, 1.8); u.turn = rnd(500, 1600); }
+    }
+  }
+}
+
+/* Animações que rodam em qualquer fase: queda dos bonecos, recuo da arma e clarão. */
+function w3Render(dt){
+  for(let i = w3.dying.length-1; i >= 0; i--){
+    const b = w3.dying[i], u = b.userData;
+    u.t += dt;
+    const k = Math.min(1, u.t/260);
+    b.rotation.x = -k*k*Math.PI/2;
+    u.mat.emissive.setScalar(Math.max(0, 1 - u.t/120));
+    if(u.t > 260) b.position.y = PLAT_Y - (u.t-260)/600;
+    if(u.t > 520 || reduceMotion){ disposeBot(b); w3.dying.splice(i,1); }
+  }
+  w3.kick = Math.max(0, w3.kick - dt/110);
+  w3.flashT = Math.max(0, w3.flashT - dt);
+  const g = w3.gun, base = g.userData.base, k = w3.kick*w3.kick;
+  g.position.set(base.x, base.y + k*.012, base.z + k*.06);
+  g.rotation.x = k*.22;
+  w3.flash.visible = w3.flashT > 0;
+  w3.flash.rotation.z = Math.random()*Math.PI;
+  w3.flashLight.intensity = w3.flashT > 0 ? 2.2 : 0;
+
+  const c = w3.camera;
+  if(Math.abs(c.fov - vFov()) > .01) w3Resize();
+  c.rotation.y = -w3.yaw*RAD;
+  c.rotation.x = -w3.pitch*RAD;
+  w3.renderer.render(w3.scene, c);
+}
+
+/* Disparo: um estalo curto de ruído filtrado. */
+function shotSound(){
+  if(!cfg.sound) return;
+  try{
+    actx = actx || new (window.AudioContext || window.webkitAudioContext)();
+    if(actx.state === 'suspended') actx.resume();
+    const n = Math.floor(actx.sampleRate*.09), buf = actx.createBuffer(1, n, actx.sampleRate), d = buf.getChannelData(0);
+    for(let i = 0; i < n; i++) d[i] = (Math.random()*2 - 1) * Math.pow(1 - i/n, 3);
+    const src = actx.createBufferSource(), f = actx.createBiquadFilter(), g = actx.createGain();
+    src.buffer = buf; f.type = 'lowpass'; f.frequency.value = 1600; g.gain.value = .14;
+    src.connect(f); f.connect(g); g.connect(actx.destination);
+    src.start();
+  }catch(e){}
+}
+
 /* ---------- Atualização e desenho ---------- */
 function update(dt){
   if(phase === 'count'){
@@ -704,6 +1080,7 @@ function update(dt){
   }else if(phase === 'running'){
     remaining -= dt;
     for(const b of balls){ b.age += dt; if(mode.speed) moveBall(b, dt); }
+    if(mode.three) w3Update(dt);
     if(mode.track){
       trackT += dt;
       const b = balls[0];
@@ -719,6 +1096,7 @@ function update(dt){
     }
     if(remaining <= 0){ remaining = 0; finishRun(); }
   }
+  if(hitMark.life > 0) hitMark.life -= dt/240;
   for(let i = particles.length-1; i >= 0; i--){
     const p = particles[i];
     p.x += p.vx*dt/1000; p.y += p.vy*dt/1000; p.life -= dt/380;
@@ -768,7 +1146,24 @@ function drawCrosshair(){
   ctx.beginPath(); ctx.arc(x, y, 1.6*Math.max(1,k), 0, Math.PI*2); ctx.fill();
 }
 
+function drawHitMark(){
+  if(hitMark.life <= 0) return;
+  const x = pos.x, y = pos.y, a = 7, b = 14;
+  ctx.globalAlpha = clamp(hitMark.life, 0, 1);
+  ctx.strokeStyle = hitMark.head ? '#ff4d5e' : '#ffffff'; ctx.lineWidth = 2.5; ctx.lineCap = 'round';
+  ctx.beginPath();
+  [[-1,-1],[1,-1],[-1,1],[1,1]].forEach(([sx,sy]) => { ctx.moveTo(x+sx*a, y+sy*a); ctx.lineTo(x+sx*b, y+sy*b); });
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+}
+
 function draw(){
+  if(mode.three){
+    ctx.clearRect(0,0,W,H);
+    if(phase === 'running') drawHitMark();
+    drawCountAndCrosshair();
+    return;
+  }
   ctx.fillStyle = C('--arena'); ctx.fillRect(0,0,W,H);
   ctx.fillStyle = C('--dot');
   for(let gx = 24; gx < W; gx += 48) for(let gy = 24; gy < H; gy += 48) ctx.fillRect(gx-1, gy-1, 2, 2);
@@ -786,7 +1181,10 @@ function draw(){
     ctx.beginPath(); ctx.arc(r.x, r.y, 6 + 16*(1-r.life), 0, Math.PI*2); ctx.stroke();
   });
   ctx.globalAlpha = 1;
+  drawCountAndCrosshair();
+}
 
+function drawCountAndCrosshair(){
   if(phase === 'count'){
     const n = Math.max(1, Math.ceil(cdLeft/1000));
     ctx.fillStyle = C('--fg'); ctx.font = '500 96px ' + C('--mono'); ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
@@ -804,6 +1202,10 @@ function updateHud(){
     setText(hudHitsLbl, 'l', 'Pontos');
     setText(hudHits, 'h', String(runScore()));
     setText(hudAcc, 'a', trackT ? Math.round(onT/trackT*100) + '%' : '—');
+  }else if(mode.three){
+    setText(hudHitsLbl, 'l', 'Abates');
+    setText(hudHits, 'h', String(hits));
+    setText(hudAcc, 'a', shots ? Math.round(hits/shots*100) + '%' : '—');
   }else{
     setText(hudHitsLbl, 'l', 'Acertos');
     setText(hudHits, 'h', String(hits));
@@ -816,6 +1218,7 @@ function frame(t){
   const dt = lastFrame ? Math.min(100, t - lastFrame) : 16;
   lastFrame = t;
   update(dt);
+  if(mode.three && w3.ready) w3Render(dt);
   draw();
   updateHud();
 }
@@ -828,7 +1231,7 @@ function renderModes(){
     b.type = 'button'; b.className = 'mode';
     b.setAttribute('aria-pressed', String(m === mode));
     const best = getBest(m, cfg.dur);
-    b.innerHTML = '<span class="mode-top"><span class="mode-name">' + m.name + '</span>' +
+    b.innerHTML = '<span class="mode-top"><span class="mode-name">' + m.name + (m.three ? '<span class="mode-tag">3D</span>' : '') + '</span>' +
       '<span class="mode-best" title="Melhor pontuação com esta duração">' + (best ? 'Recorde ' + best + (m.track ? ' pts' : '') : '—') + '</span></span>' +
       '<span class="mode-desc">' + m.desc + '</span>';
     b.addEventListener('click', () => {
@@ -837,6 +1240,7 @@ function renderModes(){
         hudMode.textContent = m.name;
         quitRun();
         renderModes();
+        show3d(!!m.three);
       }
       focusStart();
     });
