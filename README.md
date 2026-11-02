@@ -33,6 +33,11 @@ então precisa de internet). A câmera usa o campo de visão do jogo escolhido (
 conta de sensibilidade, então o movimento da mão é igual ao do jogo. Três bonecos ficam na plataforma, alguns andando
 para os lados; cada abate faz outro surgir. Tiro na cabeça aparece com marcador vermelho e conta em "Na cabeça".
 
+A visão é em primeira pessoa: o mouse gira a câmera do personagem, a mira fica sempre no centro e a pistola
+acompanha a câmera, com um leve balanço ao virar e recuo a cada tiro. Se o navegador não deixar prender o mouse
+(por exemplo, dentro de uma pré-visualização), a câmera continua girando com o movimento do mouse dentro da arena.
+No celular, arraste o dedo para girar e toque para atirar.
+
 ## Resultados
 
 - Acertos, precisão, tempo médio por alvo, melhor sequência e erros.

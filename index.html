@@ -642,19 +642,29 @@ overlay.addEventListener('click', e => {
 document.addEventListener('mousemove', e => {
   if(!locked) return;
   const k = cfg.sens * YAW[cfg.game] * cfg.fine * (cfg.dprFix ? (window.devicePixelRatio || 1) : 1);   // graus por unidade do mouse
-  if(mode.three){
-    /* No 3D a câmera gira de verdade e a mira fica no centro, como no jogo. */
-    w3.yaw = (w3.yaw + e.movementX*k) % 360;
-    w3.pitch = clamp(w3.pitch + e.movementY*k, -89, 89);
-    pos.x = W/2; pos.y = H/2;
-    return;
-  }
+  if(mode.three){ w3Look(e.movementX*k, e.movementY*k); return; }
   ang.x += e.movementX*k;
   ang.y += e.movementY*k;
   angToPos();
 });
+/* Graus por unidade de movimento, a mesma conta do jogo. */
+const degPerCount = () => cfg.sens * YAW[cfg.game] * cfg.fine * (cfg.dprFix ? (window.devicePixelRatio || 1) : 1);
+let touchLast = null;
 cv.addEventListener('pointermove', e => {
   if(locked) return;
+  if(mode.three){
+    /* Sem o mouse preso (ex.: dentro de uma pré-visualização), a câmera continua girando com o movimento
+       do mouse; no toque, arrastar o dedo gira a câmera. A mira fica sempre no centro. */
+    if(phase !== 'running' && phase !== 'count') return;
+    if(e.pointerType === 'touch'){
+      if(touchLast){ w3Look((e.clientX - touchLast.x)*.22, (e.clientY - touchLast.y)*.22); }
+      touchLast = { x:e.clientX, y:e.clientY };
+    }else{
+      const k = degPerCount();
+      w3Look((e.movementX || 0)*k, (e.movementY || 0)*k);
+    }
+    return;
+  }
   const r = cv.getBoundingClientRect();
   pos.x = clamp(e.clientX - r.left, 0, W);
   pos.y = clamp(e.clientY - r.top, 0, H);
@@ -662,7 +672,8 @@ cv.addEventListener('pointermove', e => {
 cv.addEventListener('pointerdown', e => {
   if(e.button !== 0) return;
   held = true;
-  if(!locked){
+  if(e.pointerType === 'touch') touchLast = { x:e.clientX, y:e.clientY };
+  if(!locked && !mode.three){
     const r = cv.getBoundingClientRect();
     pos.x = clamp(e.clientX - r.left, 0, W);
     pos.y = clamp(e.clientY - r.top, 0, H);
@@ -750,7 +761,7 @@ const cv3 = $('#cv3');
 const w3 = {
   ready:false, renderer:null, scene:null, camera:null, gun:null, flash:null, flashLight:null, ray:null,
   solids:[], bots:[], dying:[], decals:[], geo:null,
-  yaw:0, pitch:0, kick:0, flashT:0, lastX:null
+  yaw:0, pitch:0, kick:0, flashT:0, lastX:null, swayX:0, swayY:0, time:0
 };
 const BOT_COLOR = 0xffc928;
 const PLAT_Y = 0.95;
@@ -926,7 +937,19 @@ function buildGun(T){
   g.rotation.y = .1;
   g.scale.setScalar(.82);
   g.userData.base = g.position.clone();
+  g.userData.baseRotY = g.rotation.y;
   return g;
+}
+
+/* Gira a câmera do personagem (graus). A arma vem junto, com um pequeno atraso (balanço). */
+function w3Look(dYaw, dPitch){
+  if(!dYaw && !dPitch) return;
+  w3.yaw = (w3.yaw + dYaw) % 360;
+  const p = clamp(w3.pitch + dPitch, -89, 89);
+  w3.swayY = clamp(w3.swayY + dYaw*RAD*.35, -.12, .12);
+  w3.swayX = clamp(w3.swayX + (p - w3.pitch)*RAD*.35, -.1, .1);
+  w3.pitch = p;
+  pos.x = W/2; pos.y = H/2;
 }
 
 function vFov(){ return 2*Math.atan(Math.tan(FOV[cfg.game]*RAD/2) * 9/16) / RAD; }
@@ -976,7 +999,7 @@ function w3Clear(){
   w3.bots.forEach(disposeBot); w3.dying.forEach(disposeBot);
   w3.decals.forEach(d => w3.scene.remove(d));
   w3.bots = []; w3.dying = []; w3.decals = [];
-  w3.yaw = 0; w3.pitch = 0; w3.lastX = null; w3.kick = 0; w3.flashT = 0;
+  w3.yaw = 0; w3.pitch = 0; w3.lastX = null; w3.kick = 0; w3.flashT = 0; w3.swayX = 0; w3.swayY = 0;
 }
 
 function botOf(obj){
@@ -988,7 +1011,7 @@ function botOf(obj){
 function w3Shoot(){
   if(!w3.ready) return null;
   w3.kick = 1; w3.flashT = 55;
-  const ndc = locked ? new THREE.Vector2(0, 0) : new THREE.Vector2(pos.x/W*2 - 1, -(pos.y/H*2 - 1));
+  const ndc = new THREE.Vector2(0, 0);   // o tiro sai sempre do centro da câmera
   w3.camera.updateMatrixWorld();
   w3.ray.setFromCamera(ndc, w3.camera);
   const hit = w3.ray.intersectObjects(w3.bots.concat(w3.solids), true)[0];
@@ -1044,8 +1067,12 @@ function w3Render(dt){
   w3.kick = Math.max(0, w3.kick - dt/110);
   w3.flashT = Math.max(0, w3.flashT - dt);
   const g = w3.gun, base = g.userData.base, k = w3.kick*w3.kick;
-  g.position.set(base.x, base.y + k*.012, base.z + k*.06);
-  g.rotation.x = k*.22;
+  const decay = Math.exp(-dt/90);
+  w3.swayX *= decay; w3.swayY *= decay;
+  w3.time += dt;
+  const breath = reduceMotion ? 0 : Math.sin(w3.time/700)*.0025;
+  g.position.set(base.x - w3.swayY*.08, base.y + k*.012 + breath + w3.swayX*.05, base.z + k*.06);
+  g.rotation.set(k*.22 + w3.swayX, g.userData.baseRotY + w3.swayY, w3.swayY*.4);
   w3.flash.visible = w3.flashT > 0;
   w3.flash.rotation.z = Math.random()*Math.PI;
   w3.flashLight.intensity = w3.flashT > 0 ? 2.2 : 0;
@@ -1159,6 +1186,7 @@ function drawHitMark(){
 
 function draw(){
   if(mode.three){
+    pos.x = W/2; pos.y = H/2;
     ctx.clearRect(0,0,W,H);
     if(phase === 'running') drawHitMark();
     drawCountAndCrosshair();
