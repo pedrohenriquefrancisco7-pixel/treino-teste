@@ -117,6 +117,7 @@ details .grid{display:grid;grid-template-columns:auto 1fr;gap:10px 12px;align-it
 <div class="screen" id="screen"></div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
 <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <script>
 (function(){
@@ -582,6 +583,51 @@ function makeDummy(){
   return { group:g, parts, legs, arms, head, muzzle, x:0, z:0, yaw:0, tx:0, tz:0, tyaw:0, walk:0, moving:false, dead:false, fall:0 };
 }
 const opp = makeDummy();
+
+/* =========================================================
+   Modelo 3D externo (opcional): coloque o arquivo em modelos/agente.glb
+   Se existir, ele substitui o visual do agente; as caixas de acerto
+   (cabeça e corpo) continuam as mesmas, invisíveis por baixo.
+   ========================================================= */
+const MODEL_URL = 'modelos/agente.glb';
+const MODEL_FACES_PLUS_Z = true;   // a maioria dos modelos do Sketchfab olha para +z; mude para false se ele ficar de costas
+let mixer = null, clipIdle = null, clipWalk = null, curClip = null;
+function loadModel(){
+  if(!THREE.GLTFLoader) return;
+  new THREE.GLTFLoader().load(MODEL_URL, gltf => {
+    const model = gltf.scene;
+    const box = new THREE.Box3().setFromObject(model), size = new THREE.Vector3();
+    box.getSize(size);
+    const k = 1.8 / (size.y || 1);
+    model.scale.setScalar(k);
+    const box2 = new THREE.Box3().setFromObject(model), c = new THREE.Vector3();
+    box2.getCenter(c);
+    const wrap = new THREE.Group();
+    model.position.set(-c.x, -box2.min.y, -c.z);
+    wrap.add(model);
+    if(MODEL_FACES_PLUS_Z) wrap.rotation.y = Math.PI;
+    model.traverse(o => { if(o.isMesh){ o.castShadow = false; o.frustumCulled = false; } });
+    /* esconde o agente feito em código, mas mantém as caixas de acerto */
+    const hidden = new THREE.MeshBasicMaterial({ visible:false });
+    opp.group.traverse(o => { if(o.isMesh && o.parent !== opp.muzzle.parent) o.material = hidden; });
+    opp.group.add(wrap);
+    if(gltf.animations && gltf.animations.length){
+      mixer = new THREE.AnimationMixer(model);
+      const find = re => gltf.animations.find(a => re.test(a.name));
+      clipIdle = find(/idle|stand|pose/i) || gltf.animations[0];
+      clipWalk = find(/walk|run|jog/i);
+      playClip(clipIdle);
+    }
+  }, undefined, () => { /* sem arquivo: segue com o agente feito em código */ });
+}
+function playClip(clip){
+  if(!mixer || !clip || clip === curClip) return;
+  const next = mixer.clipAction(clip);
+  next.reset().fadeIn(.2).play();
+  if(curClip) mixer.clipAction(curClip).fadeOut(.2);
+  curClip = clip;
+}
+loadModel();
 function placeDummy(d){
   d.group.position.set(d.x, 0, d.z);
   d.group.rotation.y = d.yaw;
@@ -1332,6 +1378,7 @@ function frame(t){
     }
   }
   if(opp.group.visible) placeDummy(opp);
+  if(mixer){ playClip(opp.moving && clipWalk ? clipWalk : clipIdle); mixer.update(dt); }
 
   /* efeitos */
   for(let i=fx.length-1;i>=0;i--){
