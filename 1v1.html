@@ -509,10 +509,55 @@ function clearLine(ax, ay, az, bx, by, bz){
 /* =========================================================
    Boneco amarelo (bot ou outro jogador)
    ========================================================= */
+/* Texturas em pixel (filtro "nearest" para os pixels ficarem nítidos) */
+function pix(n, draw){
+  const c = document.createElement('canvas'); c.width = c.height = n;
+  const g = c.getContext('2d'); draw(g, n);
+  const t = new THREE.CanvasTexture(c);
+  t.magFilter = THREE.NearestFilter; t.minFilter = THREE.NearestFilter;
+  return t;
+}
+function pixNoise(g, n, base, cols, amt){
+  g.fillStyle = base; g.fillRect(0,0,n,n);
+  for(let y=0;y<n;y++) for(let x=0;x<n;x++) if(Math.random() < amt){ g.fillStyle = cols[Math.floor(Math.random()*cols.length)]; g.fillRect(x,y,1,1); }
+}
+const PIX = {
+  jacket: pix(16, (g,n) => { pixNoise(g, n, '#2c2140', ['#3f2f5c','#4d3a70','#1a1426'], .35); g.fillStyle = '#5a4482'; for(let i=0;i<n;i+=5) g.fillRect(i,0,1,n); }),
+  chest:  pix(16, (g,n) => {
+    pixNoise(g, n, '#2c2140', ['#3f2f5c','#4d3a70','#1a1426'], .35);
+    g.fillStyle = '#121016'; g.fillRect(5,0,6,16);           // blusa preta no meio
+    g.fillStyle = '#0b0a0e'; g.fillRect(5,10,6,1);
+    g.fillStyle = '#e8d3a8'; g.fillRect(7,0,2,2);            // pescoço
+    g.fillStyle = '#2fb59a'; g.fillRect(7,3,2,2);            // broche verde-água
+    g.fillStyle = '#7ff0d6'; g.fillRect(7,3,1,1);
+  }),
+  pants:  pix(16, (g,n) => { pixNoise(g, n, '#18161d', ['#25222c','#2f2b38','#0e0d11'], .3); g.fillStyle = '#3a3546'; g.fillRect(0,6,16,1); g.fillRect(0,11,16,1); }),
+  hair:   pix(16, (g,n) => { pixNoise(g, n, '#f28aa8', ['#e06f92','#ffa6bf','#d45f84'], .4); }),
+  skin:   pix(16, (g,n) => { g.fillStyle = '#ead6ad'; g.fillRect(0,0,n,n); }),
+  face:   pix(16, (g,n) => {
+    g.fillStyle = '#ead6ad'; g.fillRect(0,0,n,n);
+    g.fillStyle = '#f28aa8'; g.fillRect(0,0,16,4); g.fillRect(0,4,3,2); g.fillRect(12,4,4,3);  // franja
+    g.fillStyle = '#1b1b1b'; g.fillRect(5,7,1,2); g.fillRect(10,7,1,2);                          // olhos
+    g.fillRect(4,10,1,1); g.fillRect(11,10,1,1); g.fillRect(5,11,6,1);                           // sorriso
+    g.fillStyle = '#ffffff'; g.fillRect(6,11,4,1); g.fillStyle = '#1b1b1b'; g.fillRect(5,12,6,1);
+  }),
+  glove:  pix(8, (g,n) => { pixNoise(g, n, '#e9e6ee', ['#d3cfdb'], .3); })
+};
+const pmat = (t, extra) => new THREE.MeshLambertMaterial(Object.assign({ map:t }, extra||{}));
+
+/* =========================================================
+   Agente em pixel (bot ou outro jogador) — personagem original
+   ========================================================= */
 function makeDummy(){
   const g = new THREE.Group();
-  const yel  = new THREE.MeshStandardMaterial({ color:0xf2c230, roughness:.5 });
-  const dark = new THREE.MeshStandardMaterial({ color:0x2c3136, roughness:.6, metalness:.3 });
+  const M = {
+    jacket: pmat(PIX.jacket), pants: pmat(PIX.pants), hair: pmat(PIX.hair),
+    skin: pmat(PIX.skin), glove: pmat(PIX.glove),
+    shoe: new THREE.MeshLambertMaterial({ color:0x0d0c10 }),
+    gun: new THREE.MeshLambertMaterial({ color:0x24282c })
+  };
+  /* frente do personagem fica em -z (índice 5 da caixa) */
+  const front = (m, f) => [m,m,m,m,m,f];
   const parts = [];
   const mesh = (geo, mat, part, x, y, z, parent) => {
     const m = new THREE.Mesh(geo, mat); m.position.set(x,y,z);
@@ -520,26 +565,32 @@ function makeDummy(){
     if(part) parts.push(m);
     return m;
   };
+  /* pernas */
   const legs = [-1,1].map(s => {
-    const p = new THREE.Group(); p.position.set(s*.11, .86, 0); g.add(p);
-    mesh(new THREE.BoxGeometry(.17,.84,.2), yel, 'body', 0, -.42, 0, p);
-    mesh(new THREE.BoxGeometry(.18,.08,.28), dark, null, 0, -.82, -.04, p);
+    const p = new THREE.Group(); p.position.set(s*.14, .8, 0); g.add(p);
+    mesh(new THREE.BoxGeometry(.27,.72,.28), M.pants, 'body', 0, -.36, 0, p);
+    mesh(new THREE.BoxGeometry(.29,.1,.32), M.shoe, 'body', 0, -.75, -.02, p);
     return p;
   });
-  mesh(new THREE.BoxGeometry(.38,.18,.23), yel, 'body', 0, .92, 0);
-  mesh(new THREE.BoxGeometry(.46,.54,.27), yel, 'body', 0, 1.24, 0);
-  mesh(new THREE.BoxGeometry(.3,.2,.04), dark, null, 0, 1.3, -.14);
-  mesh(new THREE.CylinderGeometry(.06,.07,.1,10), yel, 'body', 0, 1.52, 0);
-  const head = mesh(new THREE.SphereGeometry(.145, 20, 16), yel, 'head', 0, 1.64, 0);
-  mesh(new THREE.BoxGeometry(.2,.06,.06), dark, null, 0, 1.66, -.12);
+  /* tronco com jaqueta, blusa e broche */
+  mesh(new THREE.BoxGeometry(.56,.62,.3), front(M.jacket, pmat(PIX.chest)), 'body', 0, 1.11, 0);
+  mesh(new THREE.BoxGeometry(.6,.1,.34), M.jacket, 'body', 0, .83, 0);       // barra da jaqueta
+  /* cabeça (tudo aqui conta como headshot) */
+  const head = mesh(new THREE.BoxGeometry(.32,.32,.32), front(M.skin, pmat(PIX.face)), 'head', 0, 1.6, 0);
+  mesh(new THREE.BoxGeometry(.37,.09,.37), M.hair, 'head', 0, 1.79, .005);  // topo
+  mesh(new THREE.BoxGeometry(.37,.32,.07), M.hair, 'head', 0, 1.62, .17);   // nuca
+  [-1,1].forEach(s => mesh(new THREE.BoxGeometry(.06,.3,.36), M.hair, 'head', s*.185, 1.63, .01)); // laterais (corte chanel)
+  /* braços com ombreiras grandes e luvas brancas */
   const arms = [-1,1].map(s => {
-    const p = new THREE.Group(); p.position.set(s*.29, 1.45, 0); g.add(p);
-    mesh(new THREE.BoxGeometry(.12,.56,.12), yel, 'body', 0, -.27, 0, p);
-    p.rotation.order = 'YXZ'; p.rotation.x = 1.35; p.rotation.y = s > 0 ? .08 : -.5;
+    const p = new THREE.Group(); p.position.set(s*.42, 1.36, 0); g.add(p);
+    mesh(new THREE.BoxGeometry(.3,.28,.36), M.jacket, 'body', 0, -.08, 0, p);  // ombreira
+    mesh(new THREE.BoxGeometry(.25,.5,.28), M.jacket, 'body', 0, -.36, 0, p);
+    mesh(new THREE.BoxGeometry(.22,.12,.24), M.glove, 'body', 0, -.66, 0, p);
+    p.rotation.order = 'YXZ'; p.rotation.x = 1.35; p.rotation.y = s > 0 ? .1 : -.55;
     return p;
   });
-  const gun = new THREE.Group(); gun.position.set(0, -.6, -.02); arms[1].add(gun);
-  const gb = new THREE.Mesh(new THREE.BoxGeometry(.05,.22,.08), dark); gb.position.y = -.05; gun.add(gb);
+  const gun = new THREE.Group(); gun.position.set(0, -.74, -.02); arms[1].add(gun);
+  const gb = new THREE.Mesh(new THREE.BoxGeometry(.06,.22,.09), M.gun); gb.position.y = -.05; gun.add(gb);
   const muzzle = new THREE.Object3D(); muzzle.position.set(0, -.18, 0); gun.add(muzzle);
   g.visible = false;
   scene.add(g);
