@@ -169,11 +169,12 @@ const DIFFS = {
    Three.js
    ========================================================= */
 const gameEl = $('#game');
-const renderer = new THREE.WebGLRenderer({ antialias:true });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+const renderer = new THREE.WebGLRenderer({ antialias:true, powerPreference:'high-performance' });
+renderer.setPixelRatio(1);
 renderer.setSize(innerWidth, innerHeight);
 renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.shadowMap.type = THREE.PCFShadowMap;
+renderer.shadowMap.autoUpdate = false;   // sombras do mapa são estáticas: calcula uma vez só
 renderer.autoClear = false;
 gameEl.appendChild(renderer.domElement);
 const canvas = renderer.domElement;
@@ -199,7 +200,7 @@ addEventListener('resize', () => {
 });
 
 /* ---------- Texturas feitas no canvas ---------- */
-const maxAniso = renderer.capabilities.getMaxAnisotropy();
+const maxAniso = Math.min(4, renderer.capabilities.getMaxAnisotropy());
 function tex(size, draw){
   const c = document.createElement('canvas'); c.width = c.height = size;
   const g = c.getContext('2d'); draw(g, size);
@@ -333,7 +334,7 @@ function addBlock(x, z, w, d, h, rot, mat, unit, y0, collide){
     addBlock(0, s*(COR_Z + t/2), COR_X*2 + t*2, t, h, 0, MAT.wall, 4);
   });
   /* rodapé, viga e pilares de madeira, como no galpão da referência */
-  const trim = (x,z,w,d,hh,y0) => addBlock(x,z,w,d,hh,0,MAT.beam,2,y0,false);
+  const trim = (x,z,w,d,hh,y0) => { const m = addBlock(x,z,w,d,hh,0,MAT.beam,2,y0,false); m.castShadow = false; return m; };
   [-1,1].forEach(s => {
     trim(s*(ROOM_X-.05), 0, .12, ROOM_Z*2, .8, 0);
     trim(s*(ROOM_X-.06), 0, .14, ROOM_Z*2, .25, 3.3);
@@ -379,10 +380,11 @@ scene.add(new THREE.HemisphereLight(0xfff1dc, 0x5b4f40, .62));
 scene.add(new THREE.AmbientLight(0xffffff, .12));
 const sun = new THREE.DirectionalLight(0xffe2b8, .7);
 sun.position.set(9, 26, -6); sun.castShadow = true;
-sun.shadow.mapSize.set(2048, 2048);
+sun.shadow.mapSize.set(1024, 1024);
 Object.assign(sun.shadow.camera, { left:-26, right:26, top:26, bottom:-26, near:1, far:70 });
 sun.shadow.bias = -.0006;
 scene.add(sun); scene.add(sun.target);
+renderer.shadowMap.needsUpdate = true;
 const flashLight = new THREE.PointLight(0xffc870, 0, 7);
 scene.add(flashLight);
 
@@ -514,7 +516,7 @@ function makeDummy(){
   const parts = [];
   const mesh = (geo, mat, part, x, y, z, parent) => {
     const m = new THREE.Mesh(geo, mat); m.position.set(x,y,z);
-    m.castShadow = true; m.userData.part = part; (parent||g).add(m);
+    m.userData.part = part; (parent||g).add(m);
     if(part) parts.push(m);
     return m;
   };
@@ -727,10 +729,15 @@ function shoot(){
   camera.updateMatrixWorld();
   camera.getWorldPosition(_o);
   camera.getWorldDirection(_f);
-  /* correndo, o tiro abre como no jogo; parado ou andando com Shift ele vai no centro */
+  /* erro de mira por movimento, estilo pistola do Valorant:
+     parado = cravado no centro; andando com Shift = abre um pouco; correndo = abre muito */
   const speed = Math.hypot(me.vx, me.vz);
-  if(speed > 3.2){
-    const sp = 2.4*RAD*Math.random(), a = Math.random()*Math.PI*2;
+  let spreadDeg = 0;
+  if(speed > WALK + .3) spreadDeg = 7.5;
+  else if(speed > 1.0) spreadDeg = 2.2;
+  else if(speed > .5) spreadDeg = .8;
+  if(spreadDeg > 0){
+    const sp = spreadDeg*RAD*Math.sqrt(Math.random()), a = Math.random()*Math.PI*2;
     const right = new THREE.Vector3().crossVectors(_f, camera.up).normalize();
     const up = new THREE.Vector3().crossVectors(right, _f).normalize();
     _f.addScaledVector(right, Math.cos(a)*Math.tan(sp)).addScaledVector(up, Math.sin(a)*Math.tan(sp)).normalize();
@@ -1058,18 +1065,20 @@ function hurt(big){
   tone(180, .18, 'sawtooth', .07);
 }
 let lastCdShown = -1;
+const cdEl = $('#cd'), amCur = $('#amCur'), amRl = $('#amRl'), hitmEl = $('#hitm'), dmgEl = $('#dmg');
+const hudC = {};
+function setOnce(k, obj, prop, v){ if(hudC[k] !== v){ hudC[k] = v; obj[prop] = v; } }
 function hudFrame(dt){
-  const cdEl = $('#cd');
   if(S.phase === 'countdown'){
     const n = Math.max(1, Math.ceil(S.cd));
     if(n !== lastCdShown){ lastCdShown = n; cdEl.textContent = n; tone(620,.12,'sine',.08); }
   }else if(goT > 0){
     cdEl.textContent = '0'; lastCdShown = 0;
-  }else{ cdEl.textContent = ''; lastCdShown = -1; }
-  $('#amCur').textContent = me.mag;
-  $('#amRl').hidden = !(me.reload > 0);
-  hitT = Math.max(0, hitT - dt); $('#hitm').style.opacity = hitT > 0 ? 1 : 0;
-  dmgT = Math.max(0, dmgT - dt); $('#dmg').style.opacity = Math.min(1, dmgT*1.6);
+  }else if(lastCdShown !== -1){ cdEl.textContent = ''; lastCdShown = -1; }
+  setOnce('am', amCur, 'textContent', String(me.mag));
+  setOnce('rl', amRl, 'hidden', !(me.reload > 0));
+  hitT = Math.max(0, hitT - dt); setOnce('hm', hitmEl.style, 'opacity', hitT > 0 ? '1' : '0');
+  dmgT = Math.max(0, dmgT - dt); setOnce('dg', dmgEl.style, 'opacity', String(Math.round(Math.min(1, dmgT*1.6)*20)/20));
 }
 
 /* =========================================================
@@ -1131,7 +1140,7 @@ function showMenu(note){
       '<button class="big" type="button" data-act="pvp"><b>Contra Player</b><small>Crie uma sala e mande o link de convite.</small></button>' +
     '</div>' +
     diffSeg() + sensBlock() +
-    '<p class="hint">WASD andar · Shift andar devagar (tiro preciso) · Clique atirar · R recarregar · Esc pausa. Correndo, o tiro abre como na pistola do jogo.</p>' +
+    '<p class="hint">WASD andar · Shift andar devagar (tiro preciso) · Clique atirar · R recarregar · Esc pausa. Correndo, o tiro abre muito; pare ou ande com Shift para acertar.</p>' +
     '</div>');
   wireDiff(); wireSens();
 }
