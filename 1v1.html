@@ -89,6 +89,8 @@ details .grid{display:grid;grid-template-columns:auto 1fr;gap:10px 12px;align-it
 .final .a{color:var(--accent)} .final .b{color:var(--enemy)}
 .win{color:var(--good)} .lose{color:var(--bad)}
 .err{color:var(--bad);margin:0;font-size:13px}
+.back{display:inline-block;margin-bottom:12px;color:var(--accent);font-size:13px;font-weight:600;text-decoration:none}
+.back:hover{text-decoration:underline}
 @media (max-width:560px){.choices{grid-template-columns:1fr}.card h1{font-size:36px}}
 </style>
 </head>
@@ -1253,7 +1255,7 @@ function wireDiff(){
 function clearInvite(){ try{ history.replaceState(null, '', location.pathname); }catch(e){} }
 function showMenu(note){
   show('<div class="card">' +
-    '<div><p class="kicker">Treino de Mira</p><h1>Modo 1 v 1</h1></div>' +
+    '<div><a class="back" href="index.html">← Voltar ao Treino de Mira</a><p class="kicker">Treino de Mira</p><h1>Modo 1 v 1</h1></div>' +
     '<p class="lead">Cada um tem 3 vidas. Tiro no peito tira 1, na cabeça tira as 3. Zerou as vidas do outro, ganha 1 ponto. Quem fizer 10 primeiro vence.</p>' +
     (note ? '<p class="err">' + esc(note) + '</p>' : '') +
     '<div class="choices">' +

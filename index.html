@@ -319,7 +319,9 @@ const MODES = [
   { id:'reflex', name:'Reflexo',       desc:'Duas bolinhas somem em 1,2 s. Acerte antes que elas escapem.',        count:2, r:28, spawn:'any', life:1200 },
   { id:'moving', name:'Alvo Móvel',    desc:'Duas bolinhas atravessam a arena. Antecipe o movimento e clique.',     count:2, r:28, spawn:'any', speed:170 },
   { id:'track',  name:'Rastreio',      desc:'Segure o clique e mantenha a mira na bolinha enquanto ela muda de direção.', count:1, r:30, spawn:'center', speed:230, track:true },
-  { id:'bots3d', name:'Bonecos 3D',    desc:'Arena 3D com bonecos amarelos atrás da mureta. Derrube um e outro aparece. Tiro na cabeça conta à parte.', count:3, three:true }
+  { id:'bots3d', name:'Bonecos 3D',    desc:'Arena 3D com bonecos amarelos atrás da mureta. Derrube um e outro aparece. Tiro na cabeça conta à parte.', count:3, three:true },
+  /* O 1 v 1 é outra página (1v1.html, na mesma pasta); a sensibilidade é compartilhada pelo navegador. */
+  { id:'duel',   name:'1 v 1',         desc:'Duelo em primeira pessoa contra um bot ou contra outra pessoa por link. 3 vidas por rodada, primeiro a 10 pontos vence.', count:0, link:'1v1.html' }
 ];
 let mode = MODES[0];
 
@@ -552,6 +554,7 @@ function lockPointer(){
 function unlockPointer(){ try{ if(document.pointerLockElement) document.exitPointerLock(); }catch(e){} }
 
 function startRun(){
+  if(mode.link){ location.href = mode.link; return; }
   if(mode.three && !w3.ready){
     showOverlay('<p class="ov-kicker">Bonecos 3D</p><h2>Carregando…</h2><p class="ov-meta">Preparando a arena 3D</p>');
     ensureThree().then(() => { w3Init(); if(mode.three) startRun(); }).catch(show3dError);
@@ -681,12 +684,25 @@ function finishRun(){
 
 /* ---------- Overlay ---------- */
 function focusStart(){
-  const b = overlay.querySelector('[data-act="start"]');
+  const b = overlay.querySelector('[data-act="start"], a.btn.primary');
   if(b) b.focus({ preventScroll:true });
 }
 function showOverlay(html){ overlay.innerHTML = html; overlay.hidden = false; }
 function hideOverlay(){ overlay.hidden = true; overlay.innerHTML = ''; }
+const hudTimeEl = document.querySelector('.hud-time'), hudStatsEl = document.querySelector('.hud-stats');
 function showIdle(){
+  /* no 1 v 1 não há cronômetro nem acertos aqui: o placar fica na página do duelo */
+  hudTimeEl.style.visibility = hudStatsEl.style.visibility = mode.link ? 'hidden' : '';
+  if(mode.link){
+    showOverlay(
+      '<p class="ov-kicker">Duelo</p><h2>' + mode.name + '</h2>' +
+      '<p class="ov-desc">' + mode.desc + '</p>' +
+      '<p class="ov-meta">Tiro no peito tira 1 vida · na cabeça tira 3 · WASD anda · R recarrega</p>' +
+      '<div class="ov-actions"><a class="btn primary" href="' + mode.link + '" style="padding:12px 28px;font-size:16px;text-decoration:none">Jogar 1 v 1</a></div>' +
+      '<p class="ov-note">Abre o arquivo 1v1.html, que precisa estar na mesma pasta deste. Sua sensibilidade vai junto.</p>'
+    );
+    return;
+  }
   showOverlay(
     '<p class="ov-kicker">Treino</p><h2>' + mode.name + '</h2>' +
     '<p class="ov-desc">' + mode.desc + '</p>' +
@@ -1341,7 +1357,7 @@ function renderModes(){
     b.type = 'button'; b.className = 'mode';
     b.setAttribute('aria-pressed', String(m === mode));
     const best = getBest(m, cfg.dur);
-    b.innerHTML = '<span class="mode-top"><span class="mode-name">' + m.name + (m.three ? '<span class="mode-tag">3D</span>' : '') + '</span>' +
+    b.innerHTML = '<span class="mode-top"><span class="mode-name">' + m.name + (m.three ? '<span class="mode-tag">3D</span>' : m.link ? '<span class="mode-tag">Duelo</span>' : '') + '</span>' +
       '<span class="mode-best" title="Melhor pontuação com esta duração">' + (best ? 'Recorde ' + best + (m.track ? ' pts' : '') : '—') + '</span></span>' +
       '<span class="mode-desc">' + m.desc + '</span>';
     b.addEventListener('click', () => {

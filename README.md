@@ -25,6 +25,7 @@ O mouse fica preso na arena durante o treino. `Esc` pausa e `R` reinicia.
 | Alvo Móvel | Bolinhas atravessando a arena; é preciso antecipar o movimento |
 | Rastreio | Segure o clique e mantenha a mira na bolinha enquanto ela muda de direção |
 | Bonecos 3D | Arena 3D com bonecos amarelos atrás de uma mureta, pistola e mão na tela; derrube um e outro aparece |
+| 1 v 1 | Abre o duelo (`1v1.html`) contra bot ou contra outra pessoa; os dois arquivos precisam estar na mesma pasta |
 
 ## Bonecos 3D
 
