@@ -117,7 +117,6 @@ details .grid{display:grid;grid-template-columns:auto 1fr;gap:10px 12px;align-it
 <div class="screen" id="screen"></div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
 <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <script>
 (function(){
@@ -287,13 +286,46 @@ const MAT = {
   leaf2: new THREE.MeshStandardMaterial({ color:0x7aa448, roughness:.9, flatShading:true })
 };
 
-function addBlock(x, z, w, d, h, rot, mat, unit, y0, collide){
-  const m = new THREE.Mesh(boxGeo(w, h, d, unit), mat);
-  m.position.set(x, (y0||0) + h/2, z); m.rotation.y = rot || 0;
-  m.castShadow = true; m.receiveShadow = true;
-  scene.add(m); solid.push(m);
-  if(collide !== false) obs.push({ x, z, w, d, rot:rot||0, h });
-  return m;
+/* Geometria estática: cada caixa vira triângulos já posicionados no mundo e, no fim (buildStatic),
+   tudo que usa o mesmo material e as mesmas flags de sombra vira UMA malha só.
+   O mapa nunca se mexe, então isso troca ~90 chamadas de desenho por poucas, sem mudar o visual. */
+const STATIC = new Map();
+const _mx = new THREE.Matrix4(), _q = new THREE.Quaternion(), _p = new THREE.Vector3(), _s1 = new THREE.Vector3(1,1,1);
+const _yAxis = new THREE.Vector3(0,1,0), _eu = new THREE.Euler();
+function addStatic(geo, mat, x, y, z, rot, cast, recv, isSolid){
+  const g = geo.index ? geo.toNonIndexed() : geo;
+  if(g !== geo) geo.dispose();
+  _q.setFromAxisAngle(_yAxis, rot || 0); _p.set(x, y, z);
+  g.applyMatrix4(_mx.compose(_p, _q, _s1));
+  const key = mat.uuid + (cast ? '|c' : '|') + (recv ? 'r' : '') + (isSolid ? 's' : '');
+  let e = STATIC.get(key);
+  if(!e){ e = { mat, cast, recv, isSolid, geos:[] }; STATIC.set(key, e); }
+  e.geos.push(g);
+}
+function addBlock(x, z, w, d, h, rot, mat, unit, y0, collide, cast){
+  addStatic(boxGeo(w, h, d, unit), mat, x, (y0||0) + h/2, z, rot, cast !== false, true, true);
+  if(collide !== false){ const r = rot || 0; obs.push({ x, z, w, d, rot:r, h, c:Math.cos(r), s:Math.sin(r), br:Math.hypot(w/2, d/2) }); }
+}
+function buildStatic(){
+  STATIC.forEach(e => {
+    let n = 0; for(const g of e.geos) n += g.attributes.position.count;
+    const pos = new Float32Array(n*3), nor = new Float32Array(n*3), uv = new Float32Array(n*2);
+    let o = 0;
+    for(const g of e.geos){
+      pos.set(g.attributes.position.array, o*3); nor.set(g.attributes.normal.array, o*3); uv.set(g.attributes.uv.array, o*2);
+      o += g.attributes.position.count; g.dispose();
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geo.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
+    geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+    geo.computeBoundingSphere(); geo.computeBoundingBox();
+    const m = new THREE.Mesh(geo, e.mat);
+    m.castShadow = e.cast; m.receiveShadow = e.recv;
+    m.matrixAutoUpdate = false; m.updateMatrix();
+    scene.add(m); if(e.isSolid) solid.push(m);
+  });
+  STATIC.clear();
 }
 
 /* Chão e teto */
@@ -304,12 +336,10 @@ function addBlock(x, z, w, d, h, rot, mat, unit, y0, collide){
   const ceil = new THREE.Mesh(new THREE.PlaneGeometry(fw, fd), new THREE.MeshStandardMaterial({ color:0x3b3129, roughness:1, side:THREE.DoubleSide }));
   ceil.rotation.x = Math.PI/2; ceil.position.y = WALL_H + 1.2; scene.add(ceil);
   for(let z=-ROOM_Z+1.5; z<ROOM_Z; z+=3.2){
-    const b = new THREE.Mesh(boxGeo(ROOM_X*2, .35, .3, 2), MAT.beam);
-    b.position.set(0, WALL_H + .9, z); scene.add(b);
+    addStatic(boxGeo(ROOM_X*2, .35, .3, 2), MAT.beam, 0, WALL_H + .9, z, 0, false, false, false);
   }
   for(const x of [-4, 4]){
-    const b = new THREE.Mesh(boxGeo(.35, .4, ROOM_Z*2, 2), MAT.beam);
-    b.position.set(x, WALL_H + .7, 0); scene.add(b);
+    addStatic(boxGeo(.35, .4, ROOM_Z*2, 2), MAT.beam, x, WALL_H + .7, 0, 0, false, false, false);
   }
   const sky = new THREE.Mesh(new THREE.PlaneGeometry(5, 9), new THREE.MeshBasicMaterial({ color:0xfff6e0 }));
   sky.rotation.x = Math.PI/2; sky.position.set(1.5, WALL_H + 1.15, -2); scene.add(sky);
@@ -335,7 +365,7 @@ function addBlock(x, z, w, d, h, rot, mat, unit, y0, collide){
     addBlock(0, s*(COR_Z + t/2), COR_X*2 + t*2, t, h, 0, MAT.wall, 4);
   });
   /* rodapé, viga e pilares de madeira, como no galpão da referência */
-  const trim = (x,z,w,d,hh,y0) => { const m = addBlock(x,z,w,d,hh,0,MAT.beam,2,y0,false); m.castShadow = false; return m; };
+  const trim = (x,z,w,d,hh,y0) => addBlock(x,z,w,d,hh,0,MAT.beam,2,y0,false,false);
   [-1,1].forEach(s => {
     trim(s*(ROOM_X-.05), 0, .12, ROOM_Z*2, .8, 0);
     trim(s*(ROOM_X-.06), 0, .14, ROOM_Z*2, .25, 3.3);
@@ -348,13 +378,22 @@ function addBlock(x, z, w, d, h, rot, mat, unit, y0, collide){
   });
   /* trepadeiras no topo das paredes */
   const leaves = [[-ROOM_X+.3,-6],[-ROOM_X+.3,-2],[ROOM_X-.3,4],[ROOM_X-.3,9],[ROOM_X-.3,-12],[-6,ROOM_Z-.3],[7,-ROOM_Z+.3],[-ROOM_X+.3,11]];
+  /* 48 folhas = 2 malhas instanciadas (uma por cor) em vez de 48 malhas: mesmo dodecaedro, só escalado */
+  const leafM = [[], []], sc = new THREE.Vector3();
   leaves.forEach(([x,z]) => {
     for(let i=0;i<6;i++){
-      const m = new THREE.Mesh(new THREE.DodecahedronGeometry(.35 + Math.random()*.45, 0), Math.random()<.5 ? MAT.leaf : MAT.leaf2);
-      m.position.set(x + (Math.random()-.5)*.6*(Math.abs(x)>10?0.3:3), WALL_H - Math.random()*2.6, z + (Math.random()-.5)*(Math.abs(x)>10?3:.4));
-      m.rotation.set(Math.random()*3, Math.random()*3, 0);
-      scene.add(m);
+      const r = .35 + Math.random()*.45, w = Math.random()<.5 ? 0 : 1;
+      _p.set(x + (Math.random()-.5)*.6*(Math.abs(x)>10?0.3:3), WALL_H - Math.random()*2.6, z + (Math.random()-.5)*(Math.abs(x)>10?3:.4));
+      _q.setFromEuler(_eu.set(Math.random()*3, Math.random()*3, 0));
+      leafM[w].push(new THREE.Matrix4().compose(_p, _q, sc.setScalar(r)));
     }
+  });
+  const leafGeo = new THREE.DodecahedronGeometry(1, 0);
+  [MAT.leaf, MAT.leaf2].forEach((mat, w) => {
+    if(!leafM[w].length) return;
+    const im = new THREE.InstancedMesh(leafGeo, mat, leafM[w].length);
+    leafM[w].forEach((m, i) => im.setMatrixAt(i, m));
+    scene.add(im);
   });
 }
 
@@ -375,6 +414,7 @@ function addBlock(x, z, w, d, h, rot, mat, unit, y0, collide){
     addBlock((px-PX)*SC, (py-PY)*SC, w*SC, d*SC, h, deg*RAD, MAT[kind], 1.2);
   });
 }
+buildStatic();
 
 /* Luz */
 scene.add(new THREE.HemisphereLight(0xfff1dc, 0x5b4f40, .62));
@@ -392,36 +432,37 @@ scene.add(flashLight);
 /* =========================================================
    Colisão e navegação
    ========================================================= */
-function obbLocal(o, x, z){
-  const c = Math.cos(o.rot), s = Math.sin(o.rot), dx = x - o.x, dz = z - o.z;
-  return [dx*c - dz*s, dx*s + dz*c];
-}
-function obbWorld(o, lx, lz){
-  const c = Math.cos(o.rot), s = Math.sin(o.rot);
-  return [o.x + lx*c + lz*s, o.z - lx*s + lz*c];
-}
+/* Só usado ao montar a navegação (fora do laço). */
 function distObb(o, x, z){
-  const [lx, lz] = obbLocal(o, x, z);
+  const dx = x - o.x, dz = z - o.z, lx = dx*o.c - dz*o.s, lz = dx*o.s + dz*o.c;
   const ex = Math.abs(lx) - o.w/2, ez = Math.abs(lz) - o.d/2;
   return Math.hypot(Math.max(ex,0), Math.max(ez,0)) + Math.min(Math.max(ex,ez),0);
 }
+/* Empurra o círculo (p, r) para fora das caixas. Roda todo quadro para você e para o bot:
+   sem arrays temporários e com seno/cosseno de cada caixa calculados uma vez só. */
 function resolve(p, r){
+  let x = p.x, z = p.z;                       // trabalha em variáveis locais e grava uma vez no fim
   for(let pass=0; pass<2; pass++){
-    for(const o of obs){
-      let [lx, lz] = obbLocal(o, p.x, p.z);
+    for(let i=0, n=obs.length; i<n; i++){
+      const o = obs[i], dx = x - o.x, dz = z - o.z, rr = o.br + r;
+      if(dx*dx + dz*dz >= rr*rr) continue;    // longe demais desta caixa: pula a conta girada
+      const c = o.c, s = o.s;
+      let lx = dx*c - dz*s, lz = dx*s + dz*c;
       const hw = o.w/2, hd = o.d/2;
-      const qx = clamp(lx,-hw,hw), qz = clamp(lz,-hd,hd);
-      const ex = lx - qx, ez = lz - qz, dist = Math.hypot(ex, ez);
-      if(dist >= r) continue;
+      const qx = lx < -hw ? -hw : lx > hw ? hw : lx, qz = lz < -hd ? -hd : lz > hd ? hd : lz;
+      const ex = lx - qx, ez = lz - qz, d2 = ex*ex + ez*ez;
+      if(d2 >= r*r) continue;
+      const dist = Math.sqrt(d2);
       if(dist < 1e-6){
         const px = hw - Math.abs(lx), pz = hd - Math.abs(lz);
         if(px < pz) lx = (Math.sign(lx)||1)*(hw + r); else lz = (Math.sign(lz)||1)*(hd + r);
       }else{
         lx = qx + ex/dist*r; lz = qz + ez/dist*r;
       }
-      const w = obbWorld(o, lx, lz); p.x = w[0]; p.z = w[1];
+      x = o.x + lx*c + lz*s; z = o.z - lx*s + lz*c;
     }
   }
+  p.x = x; p.z = z;
 }
 
 const NAV = { cell:.4, x0:-ROOM_X, z0:-COR_Z };
@@ -440,7 +481,6 @@ const cellIdx = (x,z) => {
   const i = clamp(Math.floor((x-NAV.x0)/NAV.cell), 0, NAV.nx-1), j = clamp(Math.floor((z-NAV.z0)/NAV.cell), 0, NAV.nz-1);
   return j*NAV.nx + i;
 };
-const cellPos = k => ({ x:NAV.x0 + (k%NAV.nx + .5)*NAV.cell, z:NAV.z0 + (Math.floor(k/NAV.nx) + .5)*NAV.cell });
 function nearestFree(k){
   if(!NAV.block[k]) return k;
   const ci = k%NAV.nx, cj = Math.floor(k/NAV.nx);
@@ -451,24 +491,47 @@ function nearestFree(k){
   }
   return k;
 }
-function segClear(a, b){
-  const d = Math.hypot(b.x-a.x, b.z-a.z), n = Math.ceil(d/.2);
-  for(let i=1;i<n;i++){ const t = i/n; if(NAV.block[cellIdx(a.x+(b.x-a.x)*t, a.z+(b.z-a.z)*t)]) return false; }
+function segClear(ax, az, bx, bz){
+  const d = Math.hypot(bx-ax, bz-az), n = Math.ceil(d/.2);
+  for(let i=1;i<n;i++){ const t = i/n; if(NAV.block[cellIdx(ax+(bx-ax)*t, az+(bz-az)*t)]) return false; }
   return true;
 }
+const cellX = k => NAV.x0 + (k%NAV.nx + .5)*NAV.cell, cellZ = k => NAV.z0 + (Math.floor(k/NAV.nx) + .5)*NAV.cell;
+const RAW = new Int32Array(NAV.N);   // caminho bruto (células), reaproveitado
 const G = new Float32Array(NAV.N), FROM = new Int32Array(NAV.N), CLOSED = new Uint8Array(NAV.N);
+/* Fila de prioridade em arrays tipados, alocada uma vez (antes: um array [f,k] novo por inserção).
+   Cada nó fechado insere no máximo 8 vizinhos, então 8·N + 1 sempre cabe. Mesma ordem de desempate. */
+const HEAP_F = new Float64Array(NAV.N*8 + 8), HEAP_K = new Int32Array(NAV.N*8 + 8);
+let heapN = 0;
+function hpush(f, k){
+  let i = heapN++;
+  while(i > 0){ const p = (i-1) >> 1; if(HEAP_F[p] <= f) break; HEAP_F[i] = HEAP_F[p]; HEAP_K[i] = HEAP_K[p]; i = p; }
+  HEAP_F[i] = f; HEAP_K[i] = k;
+}
+function hpop(){
+  const top = HEAP_K[0];
+  if(--heapN > 0){
+    const f = HEAP_F[heapN], k = HEAP_K[heapN]; let i = 0;
+    for(;;){
+      const l = 2*i + 1; if(l >= heapN) break;
+      let m = l; if(l + 1 < heapN && HEAP_F[l+1] < HEAP_F[l]) m = l + 1;
+      if(HEAP_F[m] >= f) break;
+      HEAP_F[i] = HEAP_F[m]; HEAP_K[i] = HEAP_K[m]; i = m;
+    }
+    HEAP_F[i] = f; HEAP_K[i] = k;
+  }
+  return top;
+}
 function findPath(sx, sz, tx, tz){
   const s = nearestFree(cellIdx(sx,sz)), t = nearestFree(cellIdx(tx,tz));
   G.fill(Infinity); FROM.fill(-1); CLOSED.fill(0);
-  const heap = []; // [f, k]
-  const push = (f,k) => { heap.push([f,k]); let i = heap.length-1; while(i>0){ const p=(i-1)>>1; if(heap[p][0]<=heap[i][0]) break; [heap[p],heap[i]]=[heap[i],heap[p]]; i=p; } };
-  const pop = () => { const top = heap[0], last = heap.pop(); if(heap.length){ heap[0]=last; let i=0; for(;;){ const l=2*i+1,r=l+1; let m=i; if(l<heap.length&&heap[l][0]<heap[m][0]) m=l; if(r<heap.length&&heap[r][0]<heap[m][0]) m=r; if(m===i) break; [heap[m],heap[i]]=[heap[i],heap[m]]; i=m; } } return top; };
+  heapN = 0;
   const ti = t%NAV.nx, tj = Math.floor(t/NAV.nx);
   const hfn = k => { const dx = Math.abs(k%NAV.nx - ti), dz = Math.abs(Math.floor(k/NAV.nx) - tj); return Math.max(dx,dz) + .414*Math.min(dx,dz); };
-  G[s] = 0; push(hfn(s), s);
+  G[s] = 0; hpush(hfn(s), s);
   let found = false, guard = 0;
-  while(heap.length && guard++ < 20000){
-    const [, k] = pop();
+  while(heapN && guard++ < 20000){
+    const k = hpop();
     if(CLOSED[k]) continue; CLOSED[k] = 1;
     if(k === t){ found = true; break; }
     const ci = k%NAV.nx, cj = Math.floor(k/NAV.nx);
@@ -480,161 +543,96 @@ function findPath(sx, sz, tx, tz){
       if(NAV.block[n] || CLOSED[n]) continue;
       if(di && dj && (NAV.block[cj*NAV.nx+i] || NAV.block[j*NAV.nx+ci])) continue;
       const g = G[k] + (di && dj ? 1.414 : 1);
-      if(g < G[n]){ G[n] = g; FROM[n] = k; push(g + hfn(n), n); }
+      if(g < G[n]){ G[n] = g; FROM[n] = k; hpush(g + hfn(n), n); }
     }
   }
   if(!found) return [];
-  const raw = []; for(let k=t; k!==-1; k=FROM[k]) raw.push(cellPos(k));
-  raw.reverse();
-  const out = []; let a = { x:sx, z:sz }, i = 0;
-  while(i < raw.length){
-    let j = raw.length-1;
-    while(j > i && !segClear(a, raw[j])) j--;
-    out.push(raw[j]); a = raw[j]; i = j+1;
+  let rn = 0; for(let k=t; k!==-1; k=FROM[k]) RAW[rn++] = k;
+  for(let i=0, j=rn-1; i<j; i++, j--){ const tt = RAW[i]; RAW[i] = RAW[j]; RAW[j] = tt; }
+  /* só os pontos de virada viram objetos (poucos), uma vez a cada 0,6 s */
+  const out = []; let ax = sx, az = sz, i = 0;
+  while(i < rn){
+    let j = rn-1;
+    while(j > i && !segClear(ax, az, cellX(RAW[j]), cellZ(RAW[j]))) j--;
+    ax = cellX(RAW[j]); az = cellZ(RAW[j]);
+    out.push({ x:ax, z:az }); i = j+1;
   }
   return out;
 }
 
-/* Linha de visão (só caixas e paredes seguram) */
+/* Linha de visão (só caixas e paredes seguram).
+   Roda 2× por quadro para o bot, então é conta direta, sem Raycaster e sem alocar nada:
+   o segmento é recortado contra cada caixa (planta girada + altura de 0 a h).
+   Dá o mesmo resultado do raio de antes: o chão nunca fica entre 1,15 m e 1,6 m, o rodapé
+   (0,8 m) e a viga (3,3 m) também não, e os pilares ficam colados na parede, fora do alcance
+   de quem está a mais de 0,35 m dela. */
 const ray = new THREE.Raycaster();
-const _a = new THREE.Vector3(), _b = new THREE.Vector3(), _d = new THREE.Vector3();
 function clearLine(ax, ay, az, bx, by, bz){
-  _a.set(ax,ay,az); _d.set(bx-ax, by-ay, bz-az);
-  const len = _d.length(); _d.multiplyScalar(1/len);
-  ray.set(_a, _d); ray.far = len - .05; ray.near = 0;
-  const r = ray.intersectObjects(solid, false).length === 0;
-  ray.far = Infinity;
-  return r;
+  const dx = bx - ax, dy = by - ay, dz = bz - az;
+  const len = Math.sqrt(dx*dx + dy*dy + dz*dz);
+  if(len < 1e-6) return true;
+  const tEnd = (len - .05) / len;          // como o ray.far = len - 0,05 de antes
+  for(let i=0, n=obs.length; i<n; i++){
+    const o = obs[i], c = o.c, s = o.s;
+    const ox = ax - o.x, oz = az - o.z;
+    const lx = ox*c - oz*s, lz = ox*s + oz*c;     // origem no espaço da caixa
+    const vx = dx*c - dz*s, vz = dx*s + dz*c;     // direção no espaço da caixa
+    const hw = o.w/2, hd = o.d/2;
+    let t0 = 0, t1 = tEnd;
+    if(Math.abs(vx) < 1e-9){ if(lx < -hw || lx > hw) continue; }
+    else{
+      let ta = (-hw - lx)/vx, tb = (hw - lx)/vx;
+      if(ta > tb){ const tt = ta; ta = tb; tb = tt; }
+      if(ta > t0) t0 = ta; if(tb < t1) t1 = tb;
+      if(t0 > t1) continue;
+    }
+    if(Math.abs(vz) < 1e-9){ if(lz < -hd || lz > hd) continue; }
+    else{
+      let ta = (-hd - lz)/vz, tb = (hd - lz)/vz;
+      if(ta > tb){ const tt = ta; ta = tb; tb = tt; }
+      if(ta > t0) t0 = ta; if(tb < t1) t1 = tb;
+      if(t0 > t1) continue;
+    }
+    /* dentro da planta da caixa entre t0 e t1: bloqueia se a linha passar abaixo do topo */
+    if(Math.min(ay + dy*t0, ay + dy*t1) <= o.h) return false;
+  }
+  return true;
 }
 
 /* =========================================================
-   Boneco amarelo (bot ou outro jogador)
-   ========================================================= */
-/* =========================================================
-   Agente (bot ou outro jogador) — personagem original
+   Boneco do inimigo (bot ou outro jogador): cápsula amarela com cabeça redonda.
+   As próprias malhas são as caixas de acerto: 'head' tira 3 vidas, 'body' tira 1.
    ========================================================= */
 function makeDummy(){
   const g = new THREE.Group();
-  const L = (c, o) => new THREE.MeshStandardMaterial(Object.assign({ color:c, roughness:.65 }, o||{}));
-  const M = {
-    jacket: L(0x2f2446, { roughness:.45 }), jacketHi: L(0x4b3a70, { roughness:.4 }),
-    top: L(0x141218), pants: L(0x1c1a22), boot: L(0x0e0d11, { roughness:.4 }),
-    skin: L(0xead6ad), hair: L(0xf08aa8, { roughness:.55 }), hair2: L(0xd96a8f),
-    glove: L(0xeeeaf2), gem: L(0x2fd1b0, { emissive:0x0d4a3e, roughness:.2 }), dark: L(0x1b1b1b), gun: L(0x24282c, { metalness:.4 })
-  };
+  const mat = new THREE.MeshStandardMaterial({ color:0xf2c230, roughness:.45 });
   const parts = [];
-  const mesh = (geo, mat, part, x, y, z, parent) => {
-    const m = new THREE.Mesh(geo, mat); m.position.set(x,y,z);
-    m.userData.part = part; (parent||g).add(m);
-    if(part) parts.push(m);
+  const add = (geo, part, y) => {
+    const m = new THREE.Mesh(geo, mat); m.position.y = y;
+    m.userData.part = part; g.add(m); parts.push(m);
     return m;
   };
-  const cyl = (rt, rb, h, seg) => new THREE.CylinderGeometry(rt, rb, h, seg || 14);
-  const sph = (r, ws, hs, ...a) => new THREE.SphereGeometry(r, ws || 18, hs || 14, ...a);
-
-  /* pernas: coxa e canela afinando, bota */
-  const legs = [-1,1].map(s => {
-    const p = new THREE.Group(); p.position.set(s*.11, .88, 0); g.add(p);
-    mesh(cyl(.095,.075,.44), M.pants, 'body', 0, -.22, 0, p);
-    mesh(sph(.08), M.pants, 'body', 0, -.45, 0, p);
-    mesh(cyl(.075,.06,.38), M.pants, 'body', 0, -.64, 0, p);
-    const boot = mesh(cyl(.07,.08,.12), M.boot, 'body', 0, -.82, -.02, p);
-    boot.scale.z = 1.35;
-    return p;
-  });
-  /* quadril e tronco afunilado */
-  const hip = mesh(cyl(.17,.18,.16), M.pants, 'body', 0, .9, 0); hip.scale.z = .7;
-  const waist = mesh(cyl(.15,.16,.16), M.top, 'body', 0, 1.03, 0); waist.scale.z = .68;
-  const chest = mesh(cyl(.22,.15,.36), M.jacket, 'body', 0, 1.27, 0); chest.scale.z = .62;
-  const shirt = mesh(new THREE.BoxGeometry(.13,.34,.02), M.top, null, 0, 1.28, -.125);
-  shirt.rotation.x = .1;
-  mesh(sph(.025, 10, 8), M.gem, null, 0, 1.36, -.14);                          // broche
-  const collar = mesh(cyl(.13,.2,.1), M.jacketHi, 'body', 0, 1.47, 0); collar.scale.z = .65;
-  mesh(cyl(.05,.055,.08), M.skin, 'body', 0, 1.52, 0);                         // pescoço
-  /* cabeça redonda com corte chanel e franja */
-  const head = mesh(sph(.13, 22, 18), M.skin, 'head', 0, 1.65, 0);
-  head.scale.set(1, 1.08, 1);
-  const cap = mesh(sph(.15, 22, 16, 0, Math.PI*2, 0, Math.PI*.55), M.hair, 'head', 0, 1.665, .012);
-  cap.scale.set(1.02, 1.05, 1);
-  const bob = mesh(cyl(.155,.17,.17, 22, 1, true), M.hair, 'head', 0, 1.6, .015);
-  bob.material = M.hair; bob.geometry = new THREE.CylinderGeometry(.155, .17, .17, 22, 1, true, Math.PI*.22, Math.PI*1.56);
-  bob.rotation.y = Math.PI;
-  M.hair.side = THREE.DoubleSide;
-  const bang = mesh(new THREE.BoxGeometry(.24,.06,.05), M.hair2, 'head', .02, 1.73, -.115); bang.rotation.set(-.35, 0, -.12);
-  [-1,1].forEach(s => mesh(sph(.017, 8, 6), M.dark, null, s*.045, 1.665, -.122));  // olhos
-  const smile = mesh(new THREE.TorusGeometry(.035, .007, 6, 12, Math.PI), M.dark, null, 0, 1.62, -.125);
-  smile.rotation.z = Math.PI;
-  /* braços: ombreira arredondada, braço afinando e luva */
-  const arms = [-1,1].map(s => {
-    const p = new THREE.Group(); p.position.set(s*.27, 1.42, 0); g.add(p);
-    const pad = mesh(sph(.115, 16, 12), M.jacketHi, 'body', s*.02, -.02, 0, p); pad.scale.set(1.15, .9, 1.05);
-    mesh(cyl(.08,.065,.3), M.jacket, 'body', 0, -.18, 0, p);
-    mesh(sph(.066), M.jacket, 'body', 0, -.33, 0, p);
-    mesh(cyl(.065,.05,.26), M.jacket, 'body', 0, -.46, 0, p);
-    mesh(sph(.055, 12, 10), M.glove, 'body', 0, -.61, 0, p);
-    p.rotation.order = 'YXZ'; p.rotation.x = 1.35; p.rotation.y = s > 0 ? .12 : -.6;
-    return p;
-  });
-  const gun = new THREE.Group(); gun.position.set(0, -.66, -.02); arms[1].add(gun);
-  const gb = new THREE.Mesh(new THREE.BoxGeometry(.05,.22,.08), M.gun); gb.position.y = -.05; gun.add(gb);
-  const muzzle = new THREE.Object3D(); muzzle.position.set(0, -.18, 0); gun.add(muzzle);
+  const R = .26, MID = .96;                                   // corpo: 1,48 m de altura, 52 cm de largura
+  add(new THREE.SphereGeometry(R, 24, 10, 0, Math.PI*2, Math.PI/2, Math.PI/2), 'body', R);
+  add(new THREE.CylinderGeometry(R, R, MID, 24, 1, true), 'body', R + MID/2);
+  add(new THREE.SphereGeometry(R, 24, 10, 0, Math.PI*2, 0, Math.PI/2), 'body', R + MID);
+  add(new THREE.CylinderGeometry(.055, .07, .14, 14), 'body', 1.53);   // pescoço
+  const head = add(new THREE.SphereGeometry(.14, 22, 16), 'head', 1.66);
+  /* ponto de onde saem os tiros do bot (à frente do peito) */
+  const muzzle = new THREE.Object3D(); muzzle.position.set(.12, 1.25, -.34); g.add(muzzle);
   g.visible = false;
   scene.add(g);
-  return { group:g, parts, legs, arms, head, muzzle, x:0, z:0, yaw:0, tx:0, tz:0, tyaw:0, walk:0, moving:false, dead:false, fall:0 };
+  return { group:g, parts, head, muzzle, x:0, z:0, yaw:0, tx:0, tz:0, tyaw:0, walk:0, moving:false, dead:false, fall:0 };
 }
 const opp = makeDummy();
-
-/* =========================================================
-   Modelo 3D externo (opcional): coloque o arquivo em modelos/agente.glb
-   Se existir, ele substitui o visual do agente; as caixas de acerto
-   (cabeça e corpo) continuam as mesmas, invisíveis por baixo.
-   ========================================================= */
-const MODEL_URL = 'modelos/agente.glb';
-const MODEL_FACES_PLUS_Z = true;   // a maioria dos modelos do Sketchfab olha para +z; mude para false se ele ficar de costas
-let mixer = null, clipIdle = null, clipWalk = null, curClip = null;
-function loadModel(){
-  if(!THREE.GLTFLoader) return;
-  new THREE.GLTFLoader().load(MODEL_URL, gltf => {
-    const model = gltf.scene;
-    const box = new THREE.Box3().setFromObject(model), size = new THREE.Vector3();
-    box.getSize(size);
-    const k = 1.8 / (size.y || 1);
-    model.scale.setScalar(k);
-    const box2 = new THREE.Box3().setFromObject(model), c = new THREE.Vector3();
-    box2.getCenter(c);
-    const wrap = new THREE.Group();
-    model.position.set(-c.x, -box2.min.y, -c.z);
-    wrap.add(model);
-    if(MODEL_FACES_PLUS_Z) wrap.rotation.y = Math.PI;
-    model.traverse(o => { if(o.isMesh){ o.castShadow = false; o.frustumCulled = false; } });
-    /* esconde o agente feito em código, mas mantém as caixas de acerto */
-    const hidden = new THREE.MeshBasicMaterial({ visible:false });
-    opp.group.traverse(o => { if(o.isMesh && o.parent !== opp.muzzle.parent) o.material = hidden; });
-    opp.group.add(wrap);
-    if(gltf.animations && gltf.animations.length){
-      mixer = new THREE.AnimationMixer(model);
-      const find = re => gltf.animations.find(a => re.test(a.name));
-      clipIdle = find(/idle|stand|pose/i) || gltf.animations[0];
-      clipWalk = find(/walk|run|jog/i);
-      playClip(clipIdle);
-    }
-  }, undefined, () => { /* sem arquivo: segue com o agente feito em código */ });
-}
-function playClip(clip){
-  if(!mixer || !clip || clip === curClip) return;
-  const next = mixer.clipAction(clip);
-  next.reset().fadeIn(.2).play();
-  if(curClip) mixer.clipAction(curClip).fadeOut(.2);
-  curClip = clip;
-}
-loadModel();
+/* alvos do seu tiro: mapa + boneco, montado uma vez (antes: solid.concat a cada disparo) */
+const shotTargets = solid.concat(opp.parts);
 function placeDummy(d){
   d.group.position.set(d.x, 0, d.z);
   d.group.rotation.y = d.yaw;
   d.fall = d.dead ? Math.min(1, d.fall + 0.06) : 0;
   d.group.rotation.x = d.fall * 1.45;
-  d.legs[0].rotation.x =  Math.sin(d.walk)*.5*(d.moving?1:0);
-  d.legs[1].rotation.x = -Math.sin(d.walk)*.5*(d.moving?1:0);
+  d.group.rotation.z = d.moving && !d.dead ? Math.sin(d.walk)*.05 : 0;   // balanço leve ao andar
 }
 
 /* =========================================================
@@ -671,28 +669,52 @@ const GUN_BASE = gun.position.clone();
 /* =========================================================
    Efeitos: traçantes e marcas de tiro
    ========================================================= */
-const fx = [];
-function tracer(a, b, color){
-  const geo = new THREE.BufferGeometry().setFromPoints([a.clone(), b.clone()]);
-  const mat = new THREE.LineBasicMaterial({ color: color || 0xfff0b0, transparent:true, opacity:.85 });
-  const l = new THREE.Line(geo, mat); scene.add(l);
-  fx.push({ obj:l, life:.09, max:.09 });
+/* Pool de traçantes: 24 linhas criadas uma vez e reaproveitadas em rodízio.
+   Antes cada tiro criava BufferGeometry + material e descartava 90 ms depois. */
+const TRACERS = [];
+for(let i=0;i<24;i++){
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
+  const l = new THREE.Line(geo, new THREE.LineBasicMaterial({ color:0xfff0b0, transparent:true, opacity:.85 }));
+  l.frustumCulled = false; l.visible = false; scene.add(l);
+  TRACERS.push({ obj:l, life:0, max:.09 });
 }
-const decals = [];
+let tracerNext = 0;
+function tracer(a, b, color){
+  const t = TRACERS[tracerNext]; tracerNext = (tracerNext + 1) % TRACERS.length;
+  const pa = t.obj.geometry.attributes.position, arr = pa.array;
+  arr[0] = a.x; arr[1] = a.y; arr[2] = a.z; arr[3] = b.x; arr[4] = b.y; arr[5] = b.z;
+  pa.needsUpdate = true;
+  t.obj.material.color.setHex(color || 0xfff0b0); t.obj.material.opacity = .85;
+  t.life = t.max; t.obj.visible = true;
+}
+function updateFx(dt){
+  for(let i=0;i<TRACERS.length;i++){
+    const t = TRACERS[i]; if(t.life <= 0) continue;
+    t.life -= dt;
+    if(t.life <= 0) t.obj.visible = false;
+    else t.obj.material.opacity = t.life/t.max*.85;
+  }
+}
+/* Pool de marcas de tiro: 60 malhas fixas em anel (a 61ª reaproveita a mais antiga, como antes). */
 const decalMat = new THREE.MeshBasicMaterial({ color:0x1a1612, transparent:true, opacity:.8, depthWrite:false, polygonOffset:true, polygonOffsetFactor:-4 });
 const decalGeo = new THREE.CircleGeometry(.035, 10);
+const DECALS = [];
+for(let i=0;i<60;i++){ const m = new THREE.Mesh(decalGeo, decalMat); m.visible = false; scene.add(m); DECALS.push(m); }
+let decalNext = 0;
+const _dn = new THREE.Vector3(), _dl = new THREE.Vector3();
 function decal(hit){
   if(!hit.face) return;
-  const n = hit.face.normal.clone().transformDirection(hit.object.matrixWorld);
-  const m = new THREE.Mesh(decalGeo, decalMat);
-  m.position.copy(hit.point).addScaledVector(n, .005);
-  m.lookAt(hit.point.clone().add(n));
-  scene.add(m); decals.push(m);
-  if(decals.length > 60) scene.remove(decals.shift());
+  _dn.copy(hit.face.normal).transformDirection(hit.object.matrixWorld);
+  const m = DECALS[decalNext]; decalNext = (decalNext + 1) % DECALS.length;
+  m.position.copy(hit.point).addScaledVector(_dn, .005);
+  m.lookAt(_dl.copy(hit.point).add(_dn));
+  m.visible = true;
 }
 function clearFx(){
-  decals.forEach(d => scene.remove(d)); decals.length = 0;
-  fx.forEach(f => scene.remove(f.obj)); fx.length = 0;
+  for(const m of DECALS) m.visible = false;
+  for(const t of TRACERS){ t.life = 0; t.obj.visible = false; }
+  decalNext = 0;
 }
 
 /* =========================================================
@@ -797,6 +819,8 @@ function startReload(){
 }
 
 const _o = new THREE.Vector3(), _f = new THREE.Vector3(), _m = new THREE.Vector3();
+const _rt = new THREE.Vector3(), _upv = new THREE.Vector3(), _end = new THREE.Vector3();
+const SHOT_HITS = [];
 function shoot(){
   if(!inGame || S.phase !== 'live' || S.lives[myIdx] <= 0) return;
   if(me.reload > 0) return;
@@ -820,17 +844,18 @@ function shoot(){
   else if(speed > .5) spreadDeg = .8;
   if(spreadDeg > 0){
     const sp = spreadDeg*RAD*Math.sqrt(Math.random()), a = Math.random()*Math.PI*2;
-    const right = new THREE.Vector3().crossVectors(_f, camera.up).normalize();
-    const up = new THREE.Vector3().crossVectors(right, _f).normalize();
-    _f.addScaledVector(right, Math.cos(a)*Math.tan(sp)).addScaledVector(up, Math.sin(a)*Math.tan(sp)).normalize();
+    _rt.crossVectors(_f, camera.up).normalize();
+    _upv.crossVectors(_rt, _f).normalize();
+    _f.addScaledVector(_rt, Math.cos(a)*Math.tan(sp)).addScaledVector(_upv, Math.sin(a)*Math.tan(sp)).normalize();
   }
   opp.group.updateMatrixWorld(true);
   ray.set(_o, _f); ray.near = 0; ray.far = 200;
-  const targets = opp.group.visible && !opp.dead ? solid.concat(opp.parts) : solid;
-  const hits = ray.intersectObjects(targets, false);
+  const targets = opp.group.visible && !opp.dead ? shotTargets : solid;
+  SHOT_HITS.length = 0;
+  const hits = ray.intersectObjects(targets, false, SHOT_HITS);
   ray.far = Infinity;
   _m.set(.12, -.09, -.5); camera.localToWorld(_m);
-  const end = hits.length ? hits[0].point : _o.clone().addScaledVector(_f, 120);
+  const end = hits.length ? hits[0].point : _end.copy(_o).addScaledVector(_f, 120);
   tracer(_m, end);
   if(hits.length){
     const h = hits[0], part = h.object.userData.part;
@@ -853,6 +878,7 @@ let inGame = false, paused = false, myIdx = 0;
 let S = { phase:'idle', cd:0, score:[0,0], lives:[MAX_LIVES,MAX_LIVES], rid:0, winner:-1 };
 let reT = 0, goT = 0, flashT = 0;
 const isAuth = () => mode === 'bot' || net.role === 'host';
+const posMsg = { t:'p', x:0, z:0, y:0, mv:false };   // reaproveitado a cada envio de posição
 
 function startMatch(){
   setState({ phase:'countdown', cd:3, score:[0,0], lives:[MAX_LIVES,MAX_LIVES], rid:S.rid+1, winner:-1 });
@@ -912,6 +938,7 @@ function turnTo(cur, target, rate){
   let d = target - cur; while(d > Math.PI) d -= Math.PI*2; while(d < -Math.PI) d += Math.PI*2;
   return cur + clamp(d, -rate, rate);
 }
+const _botP = { x:0, z:0 };
 function updateBot(dt){
   const D = DIFFS[cfg.diff];
   if(S.phase !== 'live' || opp.dead){ opp.moving = false; return; }
@@ -924,7 +951,8 @@ function updateBot(dt){
   if(bot.reload > 0){ bot.reload -= dt; if(bot.reload <= 0) bot.mag = MAG; }
 
   if(sees){
-    bot.lastSeen = { x:me.x, z:me.z };
+    bot.lastSeen = bot.lastSeen || { x:0, z:0 };
+    bot.lastSeen.x = me.x; bot.lastSeen.z = me.z;
     bot.react += dt;
     opp.yaw = turnTo(opp.yaw, Math.atan2(-dx, -dz), dt*9);
     bot.strafeT -= dt;
@@ -957,27 +985,30 @@ function updateBot(dt){
   }
   const k = Math.min(1, dt*12);
   bot.vx += (wx*speed - bot.vx)*k; bot.vz += (wz*speed - bot.vz)*k;
-  const p = { x:opp.x + bot.vx*dt, z:opp.z + bot.vz*dt };
+  const p = _botP; p.x = opp.x + bot.vx*dt; p.z = opp.z + bot.vz*dt;
   resolve(p, RADIUS);
   opp.x = p.x; opp.z = p.z;
   const sp = Math.hypot(bot.vx, bot.vz);
   opp.moving = sp > .5; opp.walk += sp*dt*2.2;
 }
+const _bFrom = new THREE.Vector3(), _bTo = new THREE.Vector3(), _bSide = new THREE.Vector3(), _bDir = new THREE.Vector3(), _bEnd = new THREE.Vector3();
+const BOT_HITS = [];
 function botShoot(D, seeHead, seeBody, dist){
   const pSpeed = Math.hypot(me.vx, me.vz);
   let chance = D.acc * (pSpeed > 2 ? .7 : 1) * (Math.hypot(bot.vx,bot.vz) > 1 ? .8 : 1) * clamp(1.15 - dist/40, .6, 1.1);
   if(!seeBody) chance *= .55;
   const hit = Math.random() < chance;
   opp.group.updateMatrixWorld(true);
-  const from = new THREE.Vector3(); opp.muzzle.getWorldPosition(from);
-  const to = new THREE.Vector3(me.x, 1.25, me.z);
+  const from = opp.muzzle.getWorldPosition(_bFrom);
+  const to = _bTo.set(me.x, 1.25, me.z);
   if(!hit){
-    const side = new THREE.Vector3(-(me.z-opp.z), 0, me.x-opp.x).normalize();
+    const side = _bSide.set(-(me.z-opp.z), 0, me.x-opp.x).normalize();
     to.addScaledVector(side, (Math.random()<.5?-1:1)*(.45 + Math.random()*.6)); to.y += (Math.random()-.3)*.8;
-    const dir = to.clone().sub(from).normalize();
+    const dir = _bDir.copy(to).sub(from).normalize();
     ray.set(from, dir); ray.far = 200;
-    const h = ray.intersectObjects(solid, false); ray.far = Infinity;
-    const end = h.length ? h[0].point : from.clone().addScaledVector(dir, 80);
+    BOT_HITS.length = 0;
+    const h = ray.intersectObjects(solid, false, BOT_HITS); ray.far = Infinity;
+    const end = h.length ? h[0].point : _bEnd.copy(from).addScaledVector(dir, 80);
     tracer(from, end, 0xffd36b); if(h.length) decal(h[0]);
     tone(300 + Math.random()*200, .04, 'sawtooth', .025);
   }else{
@@ -1124,11 +1155,13 @@ function onUnlock(){
 /* =========================================================
    HUD
    ========================================================= */
+const scMeEl = $('#scMe'), scOpEl = $('#scOp');
+const pipsMe = Array.from($('#lvMe').children), pipsOp = Array.from($('#lvOp').children);
 function renderHud(){
   const mi = myIdx, oi = 1 - myIdx;
-  $('#scMe').textContent = S.score[mi]; $('#scOp').textContent = S.score[oi];
-  [...$('#lvMe').children].forEach((p,i) => p.classList.toggle('off', i >= S.lives[mi]));
-  [...$('#lvOp').children].forEach((p,i) => p.classList.toggle('off', i >= S.lives[oi]));
+  scMeEl.textContent = S.score[mi]; scOpEl.textContent = S.score[oi];
+  for(let i=0;i<pipsMe.length;i++) pipsMe[i].classList.toggle('off', i >= S.lives[mi]);
+  for(let i=0;i<pipsOp.length;i++) pipsOp[i].classList.toggle('off', i >= S.lives[oi]);
 }
 let msgTimer = 0;
 function showMsg(text, kind, ms){
@@ -1137,9 +1170,10 @@ function showMsg(text, kind, ms){
 }
 function hideMsg(){ clearTimeout(msgTimer); $('#msg').style.opacity = 0; }
 let hitT = 0;
+const hitmG = $('#hitmG');
 function hitMarker(head){
   hitT = .18;
-  $('#hitmG').setAttribute('stroke', head ? '#ff5d6c' : '#ffffff');
+  hitmG.setAttribute('stroke', head ? '#ff5d6c' : '#ffffff');
 }
 let dmgT = 0;
 function hurt(big){
@@ -1148,19 +1182,24 @@ function hurt(big){
 }
 let lastCdShown = -1;
 const cdEl = $('#cd'), amCur = $('#amCur'), amRl = $('#amRl'), hitmEl = $('#hitm'), dmgEl = $('#dmg');
-const hudC = {};
-function setOnce(k, obj, prop, v){ if(hudC[k] !== v){ hudC[k] = v; obj[prop] = v; } }
+/* O HUD compara números (sem montar strings) e só escreve no DOM quando o valor muda. */
+let hudMag = -1, hudRl = null, hudHit = null, hudDmg = -1;
 function hudFrame(dt){
   if(S.phase === 'countdown'){
     const n = Math.max(1, Math.ceil(S.cd));
     if(n !== lastCdShown){ lastCdShown = n; cdEl.textContent = n; tone(620,.12,'sine',.08); }
   }else if(goT > 0){
-    cdEl.textContent = '0'; lastCdShown = 0;
+    if(lastCdShown !== 0){ cdEl.textContent = '0'; lastCdShown = 0; }
   }else if(lastCdShown !== -1){ cdEl.textContent = ''; lastCdShown = -1; }
-  setOnce('am', amCur, 'textContent', String(me.mag));
-  setOnce('rl', amRl, 'hidden', !(me.reload > 0));
-  hitT = Math.max(0, hitT - dt); setOnce('hm', hitmEl.style, 'opacity', hitT > 0 ? '1' : '0');
-  dmgT = Math.max(0, dmgT - dt); setOnce('dg', dmgEl.style, 'opacity', String(Math.round(Math.min(1, dmgT*1.6)*20)/20));
+  if(me.mag !== hudMag){ hudMag = me.mag; amCur.textContent = me.mag; }
+  const rl = me.reload > 0;
+  if(rl !== hudRl){ hudRl = rl; amRl.hidden = !rl; }
+  hitT = Math.max(0, hitT - dt);
+  const hv = hitT > 0;
+  if(hv !== hudHit){ hudHit = hv; hitmEl.style.opacity = hv ? '1' : '0'; }
+  dmgT = Math.max(0, dmgT - dt);
+  const dq = Math.round(Math.min(1, dmgT*1.6)*20);
+  if(dq !== hudDmg){ hudDmg = dq; dmgEl.style.opacity = dq/20; }
 }
 
 /* =========================================================
@@ -1308,6 +1347,7 @@ screenEl.addEventListener('click', e => {
 /* =========================================================
    Laço principal
    ========================================================= */
+const _meP = { x:0, z:0 };
 function updateMe(dt){
   const canMove = S.phase === 'live' && S.lives[myIdx] > 0;
   let fx_ = 0, fz_ = 0;
@@ -1320,7 +1360,7 @@ function updateMe(dt){
   const spd = (keys.ShiftLeft || keys.ShiftRight) ? WALK : RUN;
   const k = Math.min(1, dt*14);
   me.vx += (fx_*spd - me.vx)*k; me.vz += (fz_*spd - me.vz)*k;
-  const p = { x:me.x + me.vx*dt, z:me.z + me.vz*dt };
+  const p = _meP; p.x = me.x + me.vx*dt; p.z = me.z + me.vz*dt;
   resolve(p, RADIUS);
   me.x = p.x; me.z = p.z;
   if(me.reload > 0){ me.reload -= dt; if(me.reload <= 0){ me.reload = 0; me.mag = MAG; } }
@@ -1353,7 +1393,10 @@ function updateCamera(dt){
   gun.rotation.set(me.kick*.22 - rl*.5, 0, rl*.6);
   gun.visible = inGame && S.lives[myIdx] > 0;
 }
+/* deltaTime: vem do relógio do requestAnimationFrame, limitado a 50 ms (uma travada não teleporta ninguém)
+   e zerado quando a aba volta a ficar visível, para não aplicar de uma vez o tempo em que ela ficou escondida. */
 let last = 0;
+document.addEventListener('visibilitychange', () => { last = 0; });
 function frame(t){
   requestAnimationFrame(frame);
   const dt = last ? Math.min(.05, (t - last)/1000) : .016; last = t;
@@ -1373,18 +1416,16 @@ function frame(t){
     else updateRemote(dt);
     if(mode === 'pvp'){
       net.sendT -= dt;
-      if(net.sendT <= 0){ net.sendT = 1/30; send({ t:'p', x:me.x, z:me.z, y:me.yaw, mv:Math.hypot(me.vx,me.vz) > .5 }); }
+      if(net.sendT <= 0){
+        net.sendT = 1/30;
+        posMsg.x = me.x; posMsg.z = me.z; posMsg.y = me.yaw; posMsg.mv = Math.hypot(me.vx,me.vz) > .5;
+        send(posMsg);
+      }
       if(net.role === 'host'){ net.stT -= dt; if(net.stT <= 0){ net.stT = .2; pushState(); } }
     }
   }
   if(opp.group.visible) placeDummy(opp);
-  if(mixer){ playClip(opp.moving && clipWalk ? clipWalk : clipIdle); mixer.update(dt); }
-
-  /* efeitos */
-  for(let i=fx.length-1;i>=0;i--){
-    const f = fx[i]; f.life -= dt; f.obj.material.opacity = Math.max(0, f.life/f.max)*.85;
-    if(f.life <= 0){ scene.remove(f.obj); f.obj.geometry.dispose(); f.obj.material.dispose(); fx.splice(i,1); }
-  }
+  updateFx(dt);
   if(flashT > 0){ flashT -= dt; if(flashT <= 0){ flash.visible = false; } }
   flashLight.intensity = Math.max(0, flashLight.intensity - dt*30);
 

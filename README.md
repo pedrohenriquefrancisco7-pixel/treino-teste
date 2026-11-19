@@ -59,3 +59,13 @@ tela cheia ao iniciar e compensação de zoom do sistema. Tudo fica salvo no nav
 Regras: 3 vidas por rodada, tiro no peito tira 1, na cabeça tira 3. Zerou o outro, ganha 1 ponto. Primeiro a 10 vence. Contagem 3 → 0 antes de cada rodada. Pistola semiautomática (~6,7 tiros/s, pente de 12, recarga 1,75 s).
 
 Controles: WASD andar · Shift andar devagar (tiro preciso) · Clique atirar · R recarregar · Esc pausa.
+
+O inimigo (bot ou outro jogador) é um boneco amarelo em forma de cápsula com cabeça redonda.
+A cabeça e o corpo do boneco são as próprias áreas de acerto.
+
+## Desempenho
+
+- O mapa estático é unido em poucas malhas por material (de ~136 para ~31 chamadas de desenho por quadro no 1v1).
+- Traçantes, marcas de tiro, partículas, bolinhas e bonecos 3D vêm de pools reaproveitados.
+- A linha de visão e a colisão do bot são contas diretas, sem alocar nada no laço principal.
+- Com a tela parada (menu, pausa, resultado), o treino não redesenha nada.

@@ -339,13 +339,32 @@ const hudMode = $('#hudMode'), hudTime = $('#hudTime'), hudHits = $('#hudHits'),
 const reduceMotion = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
 const css = getComputedStyle(document.documentElement);
 const C = n => css.getPropertyValue(n).trim();
+/* Cores do tema lidas UMA vez. Antes o desenho chamava getPropertyValue (consulta de estilo)
+   várias vezes por bolinha, a cada quadro. O tema é fixo, então o valor nunca muda. */
+const COL = {
+  target:C('--target'), core:C('--target-core'), good:C('--good'), line:C('--line'), accent:C('--accent'),
+  arena:C('--arena'), dot:C('--dot'), muted:C('--muted'), fg:C('--fg')
+};
+const COUNT_FONT = '500 96px ' + C('--mono');
+const TAU = Math.PI*2;
 
 /* ---------- Estado do jogo ---------- */
 let W = 800, H = 500, scale = 1;
 let phase = 'idle';          // idle | count | running | paused | done
 let resumeTo = 'running';
 let locked = false;
-let balls = [], particles = [], ripples = [];
+let balls = [];
+/* Pools: objetos criados uma vez e reaproveitados (nada de push/splice de objetos novos a cada acerto). */
+const ballPool = [];
+const PMAX = 160, RMAX = 32;
+const particles = Array.from({ length:PMAX }, () => ({ x:0, y:0, vx:0, vy:0, life:0 }));
+const ripples = Array.from({ length:RMAX }, () => ({ x:0, y:0, life:0 }));
+let pCount = 0, rCount = 0;
+function addParticle(x, y, vx, vy){ if(pCount < PMAX){ const p = particles[pCount++]; p.x = x; p.y = y; p.vx = vx; p.vy = vy; p.life = 1; } }
+function addRipple(x, y){ if(rCount < RMAX){ const r = ripples[rCount++]; r.x = x; r.y = y; r.life = 1; } }
+function releaseBalls(){ for(let i=0;i<balls.length;i++) ballPool.push(balls[i]); balls.length = 0; }
+function removeBall(i){ ballPool.push(balls[i]); balls.splice(i, 1); }
+let needDraw = true;    // força um desenho quando algo muda fora do jogo (tamanho, fase, modo)
 let pos = { x:400, y:250 };
 /* A mira gira em graus, como no jogo, e a posição na tela vem da projeção em perspectiva. */
 const FOV = { cs2:106.26, valorant:103 };   // campo de visão horizontal em 16:9
@@ -369,6 +388,7 @@ let hits = 0, misses = 0, escaped = 0, sumRt = 0, streak = 0, bestStreak = 0, su
 let heads = 0, hitMark = { life:0, head:false };
 let held = false, trackT = 0, onT = 0, onRun = 0, bestOnRun = 0, onTarget = false;
 let flickSide = 0, lastHit = null;
+const lastHitPos = { x:0, y:0 };
 let lastFrame = 0;
 
 /* ---------- Som ---------- */
@@ -394,14 +414,58 @@ function resize(){
   const dpr = window.devicePixelRatio || 1;
   cv.width = Math.round(nw*dpr); cv.height = Math.round(nh*dpr);
   ctx.setTransform(dpr,0,0,dpr,0,0);
+  DPR = dpr;
   const fx = nw/W, fy = nh/H;
   balls.forEach(b => { b.x*=fx; b.y*=fy; });
-  ripples.length = 0;
+  rCount = 0;
   pos.x*=fx; pos.y*=fy;
   W = nw; H = nh;
   scale = clamp(Math.min(W,H)/600, 0.6, 1.3);
   posToAng();
+  buildBg();
+  ballSprites.clear();
+  needDraw = true;
   w3Resize();
+}
+
+/* Fundo (cor da arena + grade de pontos) desenhado uma vez por tamanho, num canvas fora da tela.
+   Antes eram centenas de fillRect por quadro; agora é um drawImage 1:1 em pixels. */
+let DPR = 1;
+const bgCv = document.createElement('canvas'), bgCtx = bgCv.getContext('2d');
+function buildBg(){
+  bgCv.width = cv.width; bgCv.height = cv.height;
+  bgCtx.setTransform(DPR,0,0,DPR,0,0);
+  bgCtx.fillStyle = COL.arena; bgCtx.fillRect(0,0,W,H);
+  bgCtx.fillStyle = COL.dot;
+  for(let gx = 24; gx < W; gx += 48) for(let gy = 24; gy < H; gy += 48) bgCtx.fillRect(gx-1, gy-1, 2, 2);
+}
+
+/* Bolinha com brilho: o shadowBlur é a parte cara do Canvas 2D. Ela é pintada uma vez por raio
+   num sprite e depois só copiada com drawImage. Durante o "pop" de entrada (140 ms, raio mudando)
+   ela é pintada direto, como antes. */
+const ballSprites = new Map();
+function paintBall(g, x, y, r){
+  g.shadowColor = COL.target; g.shadowBlur = 16;
+  g.fillStyle = COL.target; g.beginPath(); g.arc(x, y, r, 0, TAU); g.fill();
+  g.shadowBlur = 0;                       // em vez de save()/restore(): desfaz só o que mudou
+  g.fillStyle = COL.core;   g.beginPath(); g.arc(x, y, r*.72, 0, TAU); g.fill();
+  g.fillStyle = COL.target; g.beginPath(); g.arc(x, y, r*.46, 0, TAU); g.fill();
+  g.fillStyle = COL.core;   g.beginPath(); g.arc(x, y, r*.2, 0, TAU); g.fill();
+}
+function ballSprite(r){
+  const key = Math.round(r*100);
+  let sp = ballSprites.get(key);
+  if(!sp){
+    if(ballSprites.size > 32) ballSprites.clear();
+    const size = Math.ceil((r + 20)*2*DPR);     // 20 px de margem para o brilho (shadowBlur 16)
+    const c = document.createElement('canvas'); c.width = c.height = size;
+    const g = c.getContext('2d'); g.setTransform(DPR,0,0,DPR,0,0);
+    const half = size/DPR/2;
+    paintBall(g, half, half, r);
+    sp = { c, half };
+    ballSprites.set(key, sp);
+  }
+  return sp;
 }
 if('ResizeObserver' in window) new ResizeObserver(resize).observe(field);
 window.addEventListener('resize', resize);
@@ -423,10 +487,12 @@ function spawn(){
       y = r + 16 + Math.random()*(H - 2*r - 32);
     }
     tries++;
-    ok = !balls.some(b => Math.hypot(b.x-x,b.y-y) < (b.r + r)*1.4 + 10);
+    ok = true;
+    for(let i=0;i<balls.length;i++){ const o = balls[i]; if(Math.hypot(o.x-x,o.y-y) < (o.r + r)*1.4 + 10){ ok = false; break; } }
     if(ok && lastHit && mode.spawn !== 'sides') ok = Math.hypot(lastHit.x-x,lastHit.y-y) > r*3;
   }while(!ok && tries < 40);
-  const b = { x, y, r, age:0, life:mode.life || 0, vx:0, vy:0, turn:0 };
+  const b = ballPool.pop() || {};
+  b.x = x; b.y = y; b.r = r; b.age = 0; b.life = mode.life || 0; b.vx = 0; b.vy = 0; b.turn = 0;
   if(mode.speed) aimBall(b, Math.random()*Math.PI*2, 1);
   balls.push(b);
 }
@@ -460,11 +526,12 @@ function fillBalls(){
 /* ---------- Fases ---------- */
 function setPhase(p){
   phase = p;
+  needDraw = true;
   cv.classList.toggle('hide-cursor', (p==='running' || p==='count') && !locked);
 }
 
 function resetRun(){
-  balls = []; particles = []; ripples = [];
+  releaseBalls(); pCount = 0; rCount = 0;
   hits = misses = escaped = sumRt = streak = bestStreak = sumOff = 0;
   trackT = onT = onRun = bestOnRun = 0; onTarget = false;
   heads = 0; hitMark.life = 0;
@@ -530,7 +597,7 @@ function resumeRun(){
 function quitRun(){
   unlockPointer();
   setPhase('idle');
-  balls = []; particles = []; ripples = [];
+  releaseBalls(); pCount = 0; rCount = 0;
   w3Clear();
   remaining = cfg.dur * 1000;
   showIdle();
@@ -552,7 +619,7 @@ function sparkline(vals){
 function finishRun(){
   setPhase('done');
   unlockPointer();
-  balls = []; held = false;
+  releaseBalls(); held = false;
   w3Clear();
   const score = runScore();
   const prev = getBest(mode, cfg.dur);
@@ -733,19 +800,19 @@ function shoot(){
     const rt = b.age + Math.max(0, performance.now() - lastFrame);
     hits++; streak++; bestStreak = Math.max(bestStreak, streak); sumRt += rt;
     sumOff += clamp(Math.hypot(b.x-pos.x, b.y-pos.y) / b.r, 0, 1);
-    lastHit = { x:b.x, y:b.y };
+    lastHitPos.x = b.x; lastHitPos.y = b.y; lastHit = lastHitPos;
     if(!reduceMotion){
       for(let i=0;i<10;i++){
         const a = Math.random()*Math.PI*2, s = 60 + Math.random()*140;
-        particles.push({ x:b.x, y:b.y, vx:Math.cos(a)*s, vy:Math.sin(a)*s, life:1 });
+        addParticle(b.x, b.y, Math.cos(a)*s, Math.sin(a)*s);
       }
     }
-    balls.splice(idx,1);
+    removeBall(idx);
     fillBalls();
     tone(900, .07, 'sine', .08);
   }else{
     misses++; streak = 0;
-    ripples.push({ x:pos.x, y:pos.y, life:1 });
+    addRipple(pos.x, pos.y);
     tone(150, .09, 'triangle', .06);
   }
 }
@@ -761,7 +828,8 @@ const cv3 = $('#cv3');
 const w3 = {
   ready:false, renderer:null, scene:null, camera:null, gun:null, flash:null, flashLight:null, ray:null,
   solids:[], bots:[], dying:[], decals:[], geo:null,
-  yaw:0, pitch:0, kick:0, flashT:0, lastX:null, swayX:0, swayY:0, time:0
+  yaw:0, pitch:0, kick:0, flashT:0, lastX:null, swayX:0, swayY:0, time:0,
+  free:[], decalNext:0, dirty:true, targets:[], hits:[]
 };
 const BOT_COLOR = 0xffc928;
 const PLAT_Y = 0.95;
@@ -796,6 +864,7 @@ function show3dError(){
 
 function show3d(on){
   cv3.hidden = !on;
+  needDraw = true; w3.dirty = true;
   if(on && !w3.ready) ensureThree().then(() => { w3Init(); }).catch(() => {});
 }
 
@@ -871,6 +940,9 @@ function w3Init(){
     decal:new T.CircleGeometry(0.045, 10)
   };
   w3.decalMat = new T.MeshBasicMaterial({ color:0x0b0f12, transparent:true, opacity:.75, depthWrite:false, polygonOffset:true, polygonOffsetFactor:-2 });
+  /* pool de 40 marcas de tiro em anel (a 41ª reaproveita a mais antiga, como antes) */
+  for(let i=0;i<40;i++){ const d = new T.Mesh(w3.geo.decal, w3.decalMat); d.visible = false; scene.add(d); w3.decals.push(d); }
+  w3.ndc = new T.Vector2(0, 0); w3.n = new T.Vector3(); w3.look = new T.Vector3();
 
   w3.gun = buildGun(T);
   camera.add(w3.gun);
@@ -878,6 +950,7 @@ function w3Init(){
   w3.renderer = renderer; w3.scene = scene; w3.camera = camera;
   w3.ray = new T.Raycaster();
   w3.ready = true;
+  w3.dirty = true;
   w3Resize();
 }
 
@@ -960,6 +1033,7 @@ function w3Resize(){
   w3.camera.aspect = W/H;
   w3.camera.fov = vFov();
   w3.camera.updateProjectionMatrix();
+  w3.dirty = true;
 }
 
 function makeBot(){
@@ -982,7 +1056,11 @@ function w3Spawn(){
     ok = !w3.bots.some(b => Math.abs(b.position.x - x) < 1.6);   // lado a lado, sem um esconder o outro
     if(ok && w3.lastX !== null) ok = Math.abs(w3.lastX - x) > 1.5;
   }while(!ok && tries < 40);
-  const b = makeBot();
+  /* pool de bonecos: reaproveita um que já morreu em vez de criar grupo, malhas e material novos */
+  const b = w3.free.pop() || makeBot();
+  const u0 = b.userData;
+  u0.age = 0; u0.t = 0; u0.mat.emissive.setHex(0x000000);
+  b.rotation.set(0, 0, 0); b.scale.set(1, 1, 1);
   b.position.set(x, PLAT_Y, z);
   b.userData.vx = Math.random() < .6 ? (Math.random() < .5 ? -1 : 1) * rnd(.7, 1.8) : 0;
   b.userData.turn = rnd(500, 1600);
@@ -992,13 +1070,14 @@ function w3Spawn(){
 
 function w3Fill(){ if(w3.ready) while(w3.bots.length < mode.count) w3Spawn(); }
 
-function disposeBot(b){ w3.scene.remove(b); b.userData.mat.dispose(); }
+function disposeBot(b){ w3.scene.remove(b); w3.free.push(b); }   // volta para o pool
 
 function w3Clear(){
   if(!w3.ready) return;
   w3.bots.forEach(disposeBot); w3.dying.forEach(disposeBot);
-  w3.decals.forEach(d => w3.scene.remove(d));
-  w3.bots = []; w3.dying = []; w3.decals = [];
+  w3.decals.forEach(d => { d.visible = false; });
+  w3.bots.length = 0; w3.dying.length = 0; w3.decalNext = 0;
+  w3.dirty = true;
   w3.yaw = 0; w3.pitch = 0; w3.lastX = null; w3.kick = 0; w3.flashT = 0; w3.swayX = 0; w3.swayY = 0;
 }
 
@@ -1011,10 +1090,13 @@ function botOf(obj){
 function w3Shoot(){
   if(!w3.ready) return null;
   w3.kick = 1; w3.flashT = 55;
-  const ndc = new THREE.Vector2(0, 0);   // o tiro sai sempre do centro da câmera
   w3.camera.updateMatrixWorld();
-  w3.ray.setFromCamera(ndc, w3.camera);
-  const hit = w3.ray.intersectObjects(w3.bots.concat(w3.solids), true)[0];
+  w3.ray.setFromCamera(w3.ndc, w3.camera);   // o tiro sai sempre do centro da câmera
+  const tg = w3.targets; tg.length = 0;      // lista de alvos reaproveitada (antes: concat a cada tiro)
+  for(let i=0;i<w3.bots.length;i++) tg.push(w3.bots[i]);
+  for(let i=0;i<w3.solids.length;i++) tg.push(w3.solids[i]);
+  w3.hits.length = 0;
+  const hit = w3.ray.intersectObjects(tg, true, w3.hits)[0];
   if(!hit) return null;
   const bot = botOf(hit.object);
   if(bot){
@@ -1027,12 +1109,11 @@ function w3Shoot(){
     return { rt:bot.userData.age, head:!!hit.object.userData.head };
   }
   if(hit.face){
-    const n = hit.face.normal.clone().transformDirection(hit.object.matrixWorld);
-    const d = new THREE.Mesh(w3.geo.decal, w3.decalMat);
+    const n = w3.n.copy(hit.face.normal).transformDirection(hit.object.matrixWorld);
+    const d = w3.decals[w3.decalNext]; w3.decalNext = (w3.decalNext + 1) % w3.decals.length;
     d.position.copy(hit.point).addScaledVector(n, .005);
-    d.lookAt(hit.point.clone().add(n));
-    w3.scene.add(d); w3.decals.push(d);
-    if(w3.decals.length > 40) w3.scene.remove(w3.decals.shift());
+    d.lookAt(w3.look.copy(hit.point).add(n));
+    d.visible = true;
   }
   return null;
 }
@@ -1117,43 +1198,37 @@ function update(dt){
     }
     if(mode.life){
       for(let i = balls.length-1; i >= 0; i--){
-        if(balls[i].age > balls[i].life){ balls.splice(i,1); escaped++; streak = 0; }
+        if(balls[i].age > balls[i].life){ removeBall(i); escaped++; streak = 0; }
       }
       fillBalls();
     }
     if(remaining <= 0){ remaining = 0; finishRun(); }
   }
   if(hitMark.life > 0) hitMark.life -= dt/240;
-  for(let i = particles.length-1; i >= 0; i--){
+  for(let i = pCount-1; i >= 0; i--){
     const p = particles[i];
     p.x += p.vx*dt/1000; p.y += p.vy*dt/1000; p.life -= dt/380;
-    if(p.life <= 0) particles.splice(i,1);
+    if(p.life <= 0){ particles[i] = particles[pCount-1]; particles[pCount-1] = p; pCount--; }
   }
-  for(let i = ripples.length-1; i >= 0; i--){
-    ripples[i].life -= dt/320;
-    if(ripples[i].life <= 0) ripples.splice(i,1);
+  for(let i = rCount-1; i >= 0; i--){
+    const r = ripples[i];
+    r.life -= dt/320;
+    if(r.life <= 0){ ripples[i] = ripples[rCount-1]; ripples[rCount-1] = r; rCount--; }
   }
 }
 
 function drawBall(b){
-  const r = b.r * popScale(b);
+  const ps = popScale(b), r = b.r * ps;
   if(r <= 0.5) return;
-  ctx.save();
-  ctx.shadowColor = C('--target'); ctx.shadowBlur = 16;
-  const rings = [[1, C('--target')],[0.72, C('--target-core')],[0.46, C('--target')],[0.2, C('--target-core')]];
-  rings.forEach(([f,col], i) => {
-    if(i === 1) ctx.shadowBlur = 0;
-    ctx.fillStyle = col;
-    ctx.beginPath(); ctx.arc(b.x, b.y, r*f, 0, Math.PI*2); ctx.fill();
-  });
-  ctx.restore();
+  if(ps < 1) paintBall(ctx, b.x, b.y, r);
+  else{ const sp = ballSprite(r); ctx.drawImage(sp.c, b.x - sp.half, b.y - sp.half, sp.half*2, sp.half*2); }
   if(mode.track){
-    ctx.strokeStyle = onTarget ? C('--good') : C('--line'); ctx.lineWidth = 3;
+    ctx.strokeStyle = onTarget ? COL.good : COL.line; ctx.lineWidth = 3;
     ctx.beginPath(); ctx.arc(b.x, b.y, r + 7, 0, Math.PI*2); ctx.stroke();
   }
   if(b.life){
     const frac = clamp(1 - b.age/b.life, 0, 1);
-    ctx.strokeStyle = C('--accent'); ctx.lineWidth = 3; ctx.lineCap = 'round';
+    ctx.strokeStyle = COL.accent; ctx.lineWidth = 3; ctx.lineCap = 'round';
     ctx.beginPath(); ctx.arc(b.x, b.y, r + 8, -Math.PI/2, -Math.PI/2 + Math.PI*2*frac); ctx.stroke();
   }
 }
@@ -1161,14 +1236,16 @@ function drawBall(b){
 function drawCrosshair(){
   const k = cfg.chSize, col = CH_COLORS[cfg.chColor];
   const x = pos.x, y = pos.y, gap = 4*k, len = 9*k;
-  const segs = [[x-gap-len,y,x-gap,y],[x+gap,y,x+gap+len,y],[x,y-gap-len,x,y-gap],[x,y+gap,x,y+gap+len]];
   ctx.lineCap = 'butt';
-  [[4,'#04090b'],[2,col]].forEach(([w,c]) => {
-    ctx.strokeStyle = c; ctx.lineWidth = w;
+  for(let pass = 0; pass < 2; pass++){       // contorno escuro e depois a cor (sem arrays por quadro)
+    ctx.strokeStyle = pass ? col : '#04090b'; ctx.lineWidth = pass ? 2 : 4;
     ctx.beginPath();
-    segs.forEach(s => { ctx.moveTo(s[0],s[1]); ctx.lineTo(s[2],s[3]); });
+    ctx.moveTo(x-gap-len, y); ctx.lineTo(x-gap, y);
+    ctx.moveTo(x+gap, y);     ctx.lineTo(x+gap+len, y);
+    ctx.moveTo(x, y-gap-len); ctx.lineTo(x, y-gap);
+    ctx.moveTo(x, y+gap);     ctx.lineTo(x, y+gap+len);
     ctx.stroke();
-  });
+  }
   ctx.fillStyle = col;
   ctx.beginPath(); ctx.arc(x, y, 1.6*Math.max(1,k), 0, Math.PI*2); ctx.fill();
 }
@@ -1179,7 +1256,10 @@ function drawHitMark(){
   ctx.globalAlpha = clamp(hitMark.life, 0, 1);
   ctx.strokeStyle = hitMark.head ? '#ff4d5e' : '#ffffff'; ctx.lineWidth = 2.5; ctx.lineCap = 'round';
   ctx.beginPath();
-  [[-1,-1],[1,-1],[-1,1],[1,1]].forEach(([sx,sy]) => { ctx.moveTo(x+sx*a, y+sy*a); ctx.lineTo(x+sx*b, y+sy*b); });
+  ctx.moveTo(x-a, y-a); ctx.lineTo(x-b, y-b);
+  ctx.moveTo(x+a, y-a); ctx.lineTo(x+b, y-b);
+  ctx.moveTo(x-a, y+a); ctx.lineTo(x-b, y+b);
+  ctx.moveTo(x+a, y+a); ctx.lineTo(x+b, y+b);
   ctx.stroke();
   ctx.globalAlpha = 1;
 }
@@ -1192,22 +1272,23 @@ function draw(){
     drawCountAndCrosshair();
     return;
   }
-  ctx.fillStyle = C('--arena'); ctx.fillRect(0,0,W,H);
-  ctx.fillStyle = C('--dot');
-  for(let gx = 24; gx < W; gx += 48) for(let gy = 24; gy < H; gy += 48) ctx.fillRect(gx-1, gy-1, 2, 2);
+  ctx.setTransform(1,0,0,1,0,0);            // cópia 1:1 do fundo pronto
+  ctx.drawImage(bgCv, 0, 0);
+  ctx.setTransform(DPR,0,0,DPR,0,0);
 
-  balls.forEach(drawBall);
-  particles.forEach(p => {
+  for(let i=0;i<balls.length;i++) drawBall(balls[i]);
+  ctx.fillStyle = COL.target;               // estilo definido uma vez para todas as partículas
+  for(let i=0;i<pCount;i++){
+    const p = particles[i];
     ctx.globalAlpha = Math.max(0, p.life);
-    ctx.fillStyle = C('--target');
-    ctx.beginPath(); ctx.arc(p.x, p.y, 2 + 2*p.life, 0, Math.PI*2); ctx.fill();
-  });
-  ctx.globalAlpha = 1;
-  ripples.forEach(r => {
+    ctx.beginPath(); ctx.arc(p.x, p.y, 2 + 2*p.life, 0, TAU); ctx.fill();
+  }
+  ctx.strokeStyle = COL.muted; ctx.lineWidth = 2;
+  for(let i=0;i<rCount;i++){
+    const r = ripples[i];
     ctx.globalAlpha = Math.max(0, r.life) * 0.7;
-    ctx.strokeStyle = C('--muted'); ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.arc(r.x, r.y, 6 + 16*(1-r.life), 0, Math.PI*2); ctx.stroke();
-  });
+    ctx.beginPath(); ctx.arc(r.x, r.y, 6 + 16*(1-r.life), 0, TAU); ctx.stroke();
+  }
   ctx.globalAlpha = 1;
   drawCountAndCrosshair();
 }
@@ -1215,39 +1296,40 @@ function draw(){
 function drawCountAndCrosshair(){
   if(phase === 'count'){
     const n = Math.max(1, Math.ceil(cdLeft/1000));
-    ctx.fillStyle = C('--fg'); ctx.font = '500 96px ' + C('--mono'); ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = COL.fg; ctx.font = COUNT_FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.fillText(String(n), W/2, H/2 - 70);
   }
   if(phase === 'running' || phase === 'count') drawCrosshair();
 }
 
-let hudCache = {};
-function setText(el, key, v){ if(hudCache[key] !== v){ hudCache[key] = v; el.textContent = v; } }
+/* HUD: compara números e só monta texto / escreve no DOM quando o valor muda. */
+let hudSec = -1, hudVal = -1, hudAccV = -2, hudLbl = '';
 function updateHud(){
+  const sec = Math.max(0, Math.ceil(remaining/1000));
+  if(sec !== hudSec){ hudSec = sec; hudTime.textContent = Math.floor(sec/60) + ':' + String(sec%60).padStart(2,'0'); }
+  const lbl = mode.track ? 'Pontos' : mode.three ? 'Abates' : 'Acertos';
+  if(lbl !== hudLbl){ hudLbl = lbl; hudHitsLbl.textContent = lbl; }
+  const v = mode.track ? runScore() : hits;
+  if(v !== hudVal){ hudVal = v; hudHits.textContent = v; }
   const shots = hits + misses;
-  setText(hudTime, 't', fmtTime(remaining));
-  if(mode.track){
-    setText(hudHitsLbl, 'l', 'Pontos');
-    setText(hudHits, 'h', String(runScore()));
-    setText(hudAcc, 'a', trackT ? Math.round(onT/trackT*100) + '%' : '—');
-  }else if(mode.three){
-    setText(hudHitsLbl, 'l', 'Abates');
-    setText(hudHits, 'h', String(hits));
-    setText(hudAcc, 'a', shots ? Math.round(hits/shots*100) + '%' : '—');
-  }else{
-    setText(hudHitsLbl, 'l', 'Acertos');
-    setText(hudHits, 'h', String(hits));
-    setText(hudAcc, 'a', shots ? Math.round(hits/shots*100) + '%' : '—');
-  }
+  const a = mode.track ? (trackT ? Math.round(onT/trackT*100) : -1) : (shots ? Math.round(hits/shots*100) : -1);
+  if(a !== hudAccV){ hudAccV = a; hudAcc.textContent = a < 0 ? '—' : a + '%'; }
 }
 
+/* deltaTime vem do relógio do requestAnimationFrame, limitado a 100 ms, e volta a 16 ms quando a aba
+   reaparece (o tempo escondido não é aplicado de uma vez). Só redesenha quando algo pode ter mudado. */
+let dtReset = false;
+document.addEventListener('visibilitychange', () => { dtReset = true; });
+const busy2d = () => phase === 'running' || phase === 'count' || pCount > 0 || rCount > 0 || hitMark.life > 0;
+const busy3d = () => phase === 'running' || phase === 'count' || w3.dying.length > 0 || w3.kick > 0 || w3.flashT > 0;
 function frame(t){
   requestAnimationFrame(frame);
-  const dt = lastFrame ? Math.min(100, t - lastFrame) : 16;
+  const dt = lastFrame && !dtReset ? Math.min(100, t - lastFrame) : 16;
+  dtReset = false;
   lastFrame = t;
   update(dt);
-  if(mode.three && w3.ready) w3Render(dt);
-  draw();
+  if(mode.three && w3.ready && (w3.dirty || busy3d())){ w3Render(dt); w3.dirty = false; }
+  if(needDraw || busy2d()){ draw(); needDraw = false; }
   updateHud();
 }
 
@@ -1378,6 +1460,7 @@ function openSetup(){
   sensNum.focus({preventScroll:true});
 }
 function closeSetup(){
+  w3.dirty = true;   // o jogo (e o campo de visão) pode ter mudado
   saveCfg();
   setupEl.hidden = true;
   renderChip();
