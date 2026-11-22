@@ -79,9 +79,9 @@ function calcularFrete(float $distancia, float $peso): string|float
  * Pela "Regra de Las Vegas" (escopo das variáveis): o que acontece dentro
  * da função, fica dentro da função. A variável $imposto foi criada FORA da
  * função (escopo global), então ela NÃO EXISTE dentro de calcularTributo().
- * O PHP trata $imposto como indefinida lá dentro (Warning: Undefined variable),
- * e a multiplicação de um número por null gera erro/resultado errado
- * (no PHP 8, "Unsupported operand types" => Fatal Error em produção).
+ * O PHP trata $imposto como indefinida lá dentro (Warning: Undefined variable)
+ * e usa null no lugar dela: o cálculo vira 100 * null = 0, ou seja, o tributo
+ * sai errado (e com tipagem estrita/configuração de produção vira erro).
  *
  * CORREÇÃO:
  * Passar o imposto como PARÂMETRO da função, respeitando o isolamento do escopo.
