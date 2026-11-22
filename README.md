@@ -64,6 +64,11 @@ Controles: WASD andar · Shift andar devagar (tiro preciso) · Clique atirar · 
 O inimigo (bot ou outro jogador) é um boneco amarelo em forma de cápsula com cabeça redonda.
 A cabeça e o corpo do boneco são as próprias áreas de acerto.
 
+## Versão Roblox (`roblox/`)
+
+O 1 v 1 também existe para Roblox: abra `roblox/Duelo1v1.rbxlx` no Roblox Studio.
+Veja `roblox/README.md` para testar, publicar e jogar contra o bot ou com um amigo.
+
 ## Desempenho
 
 - O mapa estático é unido em poucas malhas por material (de ~136 para ~31 chamadas de desenho por quadro no 1v1).
